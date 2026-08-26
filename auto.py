@@ -548,17 +548,35 @@ pending_issue_state = completion_issue_state
 
 def closed_on_master(task_id, candidate):
     """Return true when the worker's completed branch is present on master."""
+    terminal = closed_issue_state_on_master(task_id)
+    if not terminal or terminal.get("fix_commit") != candidate.get("fix_commit"):
+        return False
+    return commit_is_on_ref(candidate.get("branch_head"), QUEUE_REF)
+
+
+def closed_issue_state_on_master(task_id):
+    """Return terminal metadata when master authoritatively contains a valid closed issue."""
     closed_path = "SceneIssues/closed/%s/issue.json" % task_id
     issue = read_json_at_ref(QUEUE_REF, closed_path)
     if issue is None or str(issue.get("status") or "").lower() != "fixed":
-        return False
-    if str(issue.get("fixCommit") or "").strip() != candidate.get("fix_commit"):
-        return False
+        return None
     if read_json_at_ref(QUEUE_REF, "SceneIssues/open/%s/issue.json" % task_id) is not None or \
             read_json_at_ref(QUEUE_REF, "SceneIssues/pending/%s/issue.json" % task_id) is not None:
-        return False
-    return commit_is_on_ref(candidate.get("fix_commit"), QUEUE_REF) and \
-        commit_is_on_ref(candidate.get("branch_head"), QUEUE_REF)
+        return None
+    required = ("resolvedUtc", "resolutionSummary", "regressionTest", "fixCommit")
+    if any(not str(issue.get(key) or "").strip() for key in required):
+        return None
+    fix_commit = str(issue.get("fixCommit") or "").strip()
+    verification_path = "SceneIssues/closed/%s/verification-final.png" % task_id
+    if not commit_is_on_ref(fix_commit, QUEUE_REF) or \
+            not path_exists_at_ref(QUEUE_REF, verification_path):
+        return None
+    unused_code, stdout, unused_stderr = run_git(["rev-parse", QUEUE_REF])
+    return {
+        "status": "fixed",
+        "branch_head": stdout.strip(),
+        "fix_commit": fix_commit,
+    }
 
 
 # ---------------- REGISTRY / LEASES ----------------
@@ -696,6 +714,13 @@ def reconcile_assignments(registry, now=None):
             changed = True
     for task_id, info in list(registry["tasks"].items()):
         if info.get("status") != "in_progress":
+            continue
+        terminal = closed_issue_state_on_master(task_id)
+        if terminal:
+            mark_terminal(task_id, registry, terminal, now=now)
+            log("%s is closed on master; releasing %s" % (
+                task_id, info.get("owner")))
+            changed = True
             continue
         branch_name = info.get("branch")
         if not branch_name:

@@ -606,6 +606,29 @@ class GitCompletionTests(unittest.TestCase):
         self.assertEqual("fixed", registry["tasks"]["20260825-capture"]["status"])
         self.assertEqual(300, registry["tasks"]["20260825-capture"]["completed_at"])
 
+    def test_master_closed_issue_releases_worker_without_feature_branch(self):
+        fix_commit, unused_head = self.publish_pending_branch()
+        closed_head = self.close_issue_on_feature_branch(fix_commit)
+        self.promote_to_master(closed_head)
+        self.git("update-ref", "-d", "refs/remotes/origin/fixes/agent-1")
+        registry = {"version": 1, "tasks": {
+            "20260825-capture": {
+                "status": "in_progress",
+                "owner": "agent-1",
+                "branch": "fixes/agent-1",
+                "ci_branch": "ci-test/fixes/agent-1",
+                "completion_gate": {"state": "close_and_merge"},
+            }
+        }}
+
+        changed = auto.reconcile_assignments(registry, now=400)
+
+        self.assertTrue(changed)
+        info = registry["tasks"]["20260825-capture"]
+        self.assertEqual("fixed", info["status"])
+        self.assertEqual(400, info["completed_at"])
+        self.assertIsNone(auto.get_agent_task("agent-1", registry))
+
     def test_reconcile_waits_for_green_targeted_ci(self):
         unused_fix_commit, head = self.publish_pending_branch()
         self.publish_ci_branch(head)
