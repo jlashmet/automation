@@ -1,0 +1,221 @@
+{
+  "tasks": {
+    "20260824-221508-896-VoxelShowcase": {
+      "branch": "fixes/agent-1", 
+      "ci_branch": "ci-test/fixes/agent-1", 
+      "claimed_at": 1787759313.823, 
+      "last_heartbeat": 1787785284.469, 
+      "last_prompted": 1787783709.768, 
+      "lease_history": [
+        {
+          "claimed_at": 1787674719.529, 
+          "ended_as": "stale", 
+          "last_heartbeat": 1787754573.511, 
+          "owner": "agent-2"
+        }
+      ], 
+      "owner": "agent-1", 
+      "prompt_confirmed": true, 
+      "prompt_count": 2, 
+      "response_active": true, 
+      "status": "in_progress"
+    }, 
+    "20260824-221554-001-VoxelShowcase": {
+      "branch": "fixes/agent-3", 
+      "ci_branch": "ci-test/fixes/agent-3", 
+      "claimed_at": 1787674729.792, 
+      "completed_at": 1787762852.317, 
+      "completion_commit": "12321283d5e8efeb848c67e4d47ffa637bbb98c3", 
+      "fix_commit": "d9e0d893795147cfcd9580495358dd173ee77176", 
+      "last_heartbeat": 1787762812.314, 
+      "last_prompted": 1787761880.892, 
+      "lease_history": [], 
+      "owner": "agent-3", 
+      "status": "fixed"
+    }, 
+    "20260825-032832-253-VoxelShowcase": {
+      "branch": "fixes/agent-4", 
+      "ci_activity": {
+        "ci_head": "b2944662de402c9e25aac749d1adddceaeaab709", 
+        "run_created_at": "2026-08-26T22:59:32Z", 
+        "run_id": 33021624676, 
+        "run_url": "https://github.com/jlashmet/voxel/actions/runs/33021624676", 
+        "state": "in_progress"
+      }, 
+      "ci_branch": "ci-test/fixes/agent-4", 
+      "claimed_at": 1787683371.339, 
+      "last_heartbeat": 1787785215.66, 
+      "last_prompted": 1787778086.345, 
+      "lease_history": [], 
+      "owner": "agent-4", 
+      "prompt_count": 2, 
+      "response_active": true, 
+      "status": "in_progress"
+    }, 
+    "20260825-033015-205-VoxelShowcase": {
+      "branch": "fixes/agent-5", 
+      "ci_branch": "ci-test/fixes/agent-5", 
+      "claimed_at": 1787683381.671, 
+      "completed_at": 1787759305.582, 
+      "completion_commit": "e2fab35a586246dc4061d399464f3381f1e41673", 
+      "fix_commit": "eaead8ede86cbf90e36ead8d92ddbc4a34083aa9", 
+      "last_heartbeat": 1787755885.24, 
+      "last_prompted": 1787750669.32, 
+      "lease_history": [], 
+      "owner": "agent-5", 
+      "status": "fixed"
+    }, 
+    "20260825-033053-588-VoxelShowcase": {
+      "branch": "fixes/agent-6", 
+      "ci_branch": "ci-test/fixes/agent-6", 
+      "claimed_at": 1787683392.019, 
+      "last_heartbeat": 1787785232.8, 
+      "last_prompted": 1787779536.706, 
+      "lease_history": [], 
+      "owner": "agent-6", 
+      "prompt_confirmed": true, 
+      "prompt_count": 4, 
+      "response_active": true, 
+      "status": "in_progress"
+    }, 
+    "20260825-033249-397-VoxelShowcase": {
+      "branch": "fixes/agent-1", 
+      "ci_branch": "ci-test/fixes/agent-1", 
+      "claimed_at": 1787683813.115, 
+      "completed_at": 1787759305.001, 
+      "completion_commit": "bfccb29f34f2373ae7cafac5a38e21a7c2e9ba86", 
+      "fix_commit": "416522e1816fd4e6a315f9831e523156304e1c18", 
+      "last_heartbeat": 1787755853.159, 
+      "last_prompted": 1787755857.299, 
+      "lease_history": [], 
+      "owner": "agent-1", 
+      "status": "fixed"
+    }, 
+    "20260825-040805-194-VoxelShowcase": {
+      "branch": "fixes/agent-1", 
+      "ci_branch": "ci-test/fixes/agent-1", 
+      "claimed_at": 1787671965.886, 
+      "completed_at": 1787683768.582, 
+      "completion_commit": "700f4fa0bac40c497d49263ac280f688119c828a", 
+      "fix_commit": "433bbe8ed24ce43627d4ff547d46e53930121f9e", 
+      "last_heartbeat": 1787683732.677, 
+      "last_prompted": 1787683352.315, 
+      "lease_history": [], 
+      "owner": "agent-1", 
+      "status": "fixed"
+    }, 
+    "20260825-192751-413-VoxelShowcase": {
+      "branch": "fixes/agent-2", 
+      "ci_branch": "ci-test/fixes/agent-2", 
+      "claimed_at": 1787759323.811, 
+      "last_heartbeat": 1787785185.342, 
+      "last_prompted": 1787785190.786, 
+      "lease_history": [
+        {
+          "claimed_at": 1787686678.868, 
+          "ended_as": "stale", 
+          "last_heartbeat": 1787754514.45, 
+          "owner": "agent-7"
+        }
+      ], 
+      "owner": "agent-2", 
+      "prompt_confirmed": true, 
+      "prompt_count": 9, 
+      "response_active": true, 
+      "status": "in_progress"
+    }, 
+    "20260825-193517-651-WorldbuildingGalleryShowcase": {
+      "branch": "fixes/agent-8", 
+      "ci_branch": "ci-test/fixes/agent-8", 
+      "claimed_at": 1787686687.968, 
+      "completed_at": 1787759306.148, 
+      "completion_commit": "22dc141b3374940d6d8b1ffde3b79085f10fda8d", 
+      "fix_commit": "92515619e714ce3aa899f8eca884d342fadb890b", 
+      "last_heartbeat": 1787754629.814, 
+      "last_prompted": 1787754527.65, 
+      "lease_history": [], 
+      "owner": "agent-8", 
+      "status": "fixed"
+    }, 
+    "20260826-132038-408-VoxelShowcase": {
+      "branch": "fixes/agent-5", 
+      "ci_activity": {
+        "ci_head": "117cc88cdabefd8541e7e4e39659aa40ea08bae4", 
+        "run_created_at": "2026-08-26T23:01:06Z", 
+        "run_id": 33021740092, 
+        "run_url": "https://github.com/jlashmet/voxel/actions/runs/33021740092", 
+        "state": "queued"
+      }, 
+      "ci_branch": "ci-test/fixes/agent-5", 
+      "claimed_at": 1787759349.809, 
+      "last_heartbeat": 1787785224.016, 
+      "last_prompted": 1787783258.146, 
+      "lease_history": [], 
+      "owner": "agent-5", 
+      "prompt_confirmed": true, 
+      "prompt_count": 5, 
+      "response_active": true, 
+      "status": "in_progress"
+    }, 
+    "20260826-132144-249-VoxelShowcase": {
+      "branch": "fixes/agent-7", 
+      "ci_branch": "ci-test/fixes/agent-7", 
+      "claimed_at": 1787759367.041, 
+      "last_heartbeat": 1787785241.218, 
+      "last_prompted": 1787785246.699, 
+      "lease_history": [], 
+      "owner": "agent-7", 
+      "prompt_confirmed": true, 
+      "prompt_count": 4, 
+      "response_active": true, 
+      "status": "in_progress"
+    }, 
+    "20260826-132234-356-VoxelShowcase": {
+      "branch": "fixes/agent-8", 
+      "ci_activity": {
+        "ci_head": "afef3e259be028c38f09131907d611c91e587b10", 
+        "run_created_at": "2026-08-26T22:59:38Z", 
+        "run_id": 33021631730, 
+        "run_url": "https://github.com/jlashmet/voxel/actions/runs/33021631730", 
+        "state": "queued"
+      }, 
+      "ci_branch": "ci-test/fixes/agent-8", 
+      "claimed_at": 1787759376.929, 
+      "last_heartbeat": 1787785255.469, 
+      "last_prompted": 1787783484.299, 
+      "lease_history": [], 
+      "owner": "agent-8", 
+      "prompt_confirmed": true, 
+      "prompt_count": 3, 
+      "response_active": true, 
+      "status": "in_progress"
+    }, 
+    "20260826-132402-138-VoxelShowcase": {
+      "branch": "fixes/agent-9", 
+      "ci_branch": "ci-test/fixes/agent-9", 
+      "claimed_at": 1787759386.252, 
+      "last_heartbeat": 1787785263.727, 
+      "last_prompted": 1787783396.253, 
+      "lease_history": [], 
+      "owner": "agent-9", 
+      "prompt_confirmed": true, 
+      "prompt_count": 5, 
+      "response_active": true, 
+      "status": "in_progress"
+    }, 
+    "20260826-132429-861-VoxelShowcase": {
+      "branch": "fixes/agent-3", 
+      "ci_branch": "ci-test/fixes/agent-3", 
+      "claimed_at": 1787762869.096, 
+      "last_heartbeat": 1787785302.493, 
+      "last_prompted": 1787785307.928, 
+      "lease_history": [], 
+      "owner": "agent-3", 
+      "prompt_confirmed": true, 
+      "prompt_count": 10, 
+      "response_active": true, 
+      "status": "in_progress"
+    }
+  }, 
+  "version": 1
+}
