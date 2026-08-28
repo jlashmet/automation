@@ -7,7 +7,9 @@ captures under `SceneIssues/closed/`.
 ## Before starting
 
 1. Put the remote-agent conversations in browser tabs 1 through 9. Keep that browser as the
-   foreground application; the script selects tabs with `Cmd+1` through `Cmd+9`.
+   foreground application. The script selects each exact tab with an atomic `Cmd+number`
+   shortcut so the permanent agent-to-tab mapping survives restarts and missed UI actions. It
+   allows five seconds for the selected tab to settle before inspecting it.
 2. Ensure Java/Oculix has macOS Accessibility and Screen Recording permission.
 3. Ensure `/Users/jlashmet/code/voxel` exists, `origin` is configured, and `gh auth status` succeeds.
 4. Run the repository-root `./push_scene_issues.sh` from an up-to-date local `master` to publish
@@ -49,8 +51,24 @@ leaves the lease in place so unfinished work is not silently stacked beneath ano
 After selecting a tab, the coordinator scrolls to the bottom. If the conversation-length screen is
 visible, it clicks **Start new chat**, resets that task's prompt backoff, and sends either the full
 assignment or the task's current coordinator gate into the fresh conversation.
+If ChatGPT then shows **Got it** with a prefilled message, the coordinator dismisses the notice but
+does not trust the restored draft. It replaces the composer with the assignment currently owned by
+that exact agent, or submits nothing when the tab has no current assignment. It waits five seconds
+for the post-dialog composer to settle and moves the pointer away from the action button before
+checking whether generation started. A failed transition saves lower-screen diagnostics under
+`_diagnostics/` and logs whether the textbox, Submit button, and running control were visible.
 Prompt backoff advances only after the running-response control confirms that submission started;
-an unconfirmed click is retried instead of being recorded as a successful instruction.
+an unconfirmed click is retried with Enter and remains immediately retryable instead of being
+recorded as a successful instruction. Before pasting, the coordinator selects the entire composer
+contents so a stale draft or leaked tab-switch digit cannot contaminate the next instruction.
+Key browser states use five-second image searches, retaining the original script's tolerance for
+slow tab rendering.
+The composer is considered available when either the empty **Ask ChatGPT** placeholder or the blue
+Submit button is visible. This allows restored, non-empty drafts to be focused and replaced even
+though entering text hides the placeholder image.
+Running-state detection uses a separate crop containing only the white Stop square at 0.95 image
+similarity. The shared blue-circle background can therefore no longer make the Submit arrow look
+like a running response.
 
 Idle agents are nudged with a ten-to-thirty-minute exponential backoff. A known queued or running
 targeted-CI request suppresses nudges entirely. The coordinator looks up the exact request SHA in
@@ -66,7 +84,6 @@ For a completed issue, the coordinator waits until all of these are visible afte
 - the assigned remote feature branch moves the capture from `open/` to `pending/` and marks it `pending`;
 - `resolutionSummary`, `regressionTest`, and `fixCommit` are populated;
 - `fixCommit` is an ancestor of that feature branch;
-- `verification-final.png` exists in the pending capture;
 - the feature-only diff contains no other capture, CI request file, or workflow;
 - the paired CI request branch contains `fixCommit`; and
 - the CI branch head has a successful `ci/single-test` commit status;

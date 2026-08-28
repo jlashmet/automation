@@ -1,0 +1,6 @@
+_diagnostics/
+.DS_Store
+__pycache__/
+*.py[cod]
+log.txt
+oculixide-4.0.0-macos.jar

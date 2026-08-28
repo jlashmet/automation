@@ -36,39 +36,53 @@ def discover_script_dir():
 
 
 SCRIPT_DIR = discover_script_dir()
-REPO_PATH = "/Users/jason/code/voxel"
+REPO_PATH = "/Users/jlashmet/code/voxel"
 SCENE_ISSUES_PATH = os.path.join(REPO_PATH, "SceneIssues")
 OPEN_SCENE_ISSUES_PATH = os.path.join(SCENE_ISSUES_PATH, "open")
 PENDING_SCENE_ISSUES_PATH = os.path.join(SCENE_ISSUES_PATH, "pending")
 REGISTRY_PATH = os.path.join(SCRIPT_DIR, "_registry.json")
 LOCK_PATH = os.path.join(SCRIPT_DIR, "_coordinator.lock")
+DIAGNOSTICS_PATH = os.path.join(SCRIPT_DIR, "_diagnostics")
 
-NUM_AGENTS = 9                         # browser tabs selected with Cmd+1 .. Cmd+5
+NUM_AGENTS = 9                         # browser tabs selected with Cmd+1 .. Cmd+9
 REMOTE = "origin"
 QUEUE_REF = "origin/master"
 GITHUB_REPOSITORY = "jlashmet/voxel"
 FEATURE_BRANCH_TEMPLATE = "fixes/agent-{number}"
 CI_BRANCH_TEMPLATE = "ci-test/fixes/agent-{number}"
 
-POLL_WAIT_SECONDS = 8
+POLL_WAIT_SECONDS = 5
 FETCH_INTERVAL_SECONDS = 30
+TAB_SETTLE_SECONDS = 5
+UI_STATE_TIMEOUT_SECONDS = 5
 STALE_SECONDS = 60 * 60                # reclaim after one hour without a visible live tab
 NUDGE_INTERVAL_SECONDS = 10 * 60
 MAX_NUDGE_INTERVAL_SECONDS = 30 * 60
 IMAGE_TIMEOUT_SECONDS = 5
-MIN_IMAGE_SIMILARITY = 0.90
+MIN_IMAGE_SIMILARITY = 0.95
+RUNNING_IMAGE = "in_progress_glyph.png"
+REGISTRY_READ_ATTEMPTS = 5
+REGISTRY_READ_RETRY_SECONDS = 0.25
 
 OPEN_STATUSES = ("", "open", "todo")
 PENDING_STATUS = "pending"
 
 _lock_owned = False
 
+try:
+    TEXT_TYPE = unicode
+except NameError:
+    TEXT_TYPE = str
+
 
 # ---------------- GENERAL HELPERS ----------------
 
 def log(message):
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-    sys.stdout.write("[%s] %s\n" % (stamp, message))
+    line = "[%s] %s\n" % (stamp, _text(message))
+    if sys.version_info[0] < 3:
+        line = line.encode("utf-8")
+    sys.stdout.write(line)
     sys.stdout.flush()
 
 
@@ -104,10 +118,26 @@ def load_registry(path=None):
     path = path or REGISTRY_PATH
     if not os.path.exists(path):
         return {"version": 1, "tasks": {}}
-    with open(path, "r") as handle:
-        value = json.load(handle)
+    value = None
+    last_error = None
+    for attempt in range(REGISTRY_READ_ATTEMPTS):
+        try:
+            with open(path, "r") as handle:
+                value = json.load(handle)
+            last_error = None
+            break
+        except (IOError, ValueError) as error:
+            last_error = error
+            if attempt + 1 < REGISTRY_READ_ATTEMPTS:
+                time.sleep(REGISTRY_READ_RETRY_SECONDS)
+    if last_error is not None:
+        raise ValueError(
+            "could not read registry JSON at %s after %d attempts: %s" % (
+                os.path.abspath(path), REGISTRY_READ_ATTEMPTS, last_error))
     if not isinstance(value, dict) or not isinstance(value.get("tasks"), dict):
-        raise ValueError("registry must be an object containing a tasks object")
+        raise ValueError(
+            "registry at %s must be an object containing a tasks object" %
+            os.path.abspath(path))
     return value
 
 
@@ -157,6 +187,17 @@ def _decode(value):
     return value
 
 
+def _text(value):
+    """Return Unicode text without Python 2/Jython's implicit ASCII coercion."""
+    if value is None:
+        return TEXT_TYPE("")
+    if isinstance(value, TEXT_TYPE):
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return TEXT_TYPE(value)
+
+
 def run_git(arguments, check=True):
     command = ["git", "-C", REPO_PATH] + list(arguments)
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -201,7 +242,7 @@ def list_open_tasks(ref_name=None):
         if issue is None:
             log("ignoring invalid issue JSON at %s:%s" % (ref_name, path))
             continue
-        status = str(issue.get("status") or "").lower()
+        status = _text(issue.get("status") or "").lower()
         if status in OPEN_STATUSES:
             tasks.append(parts[2])
     return sorted(set(tasks))
@@ -296,12 +337,6 @@ def branch_policy_violations(task_id, branch_name):
     return sorted(set(violations))
 
 
-def path_exists_at_ref(ref_name, repo_relative_path):
-    code, unused_stdout, unused_stderr = run_git(
-        ["cat-file", "-e", "%s:%s" % (ref_name, repo_relative_path)], check=False)
-    return code == 0
-
-
 def github_status_context(commit_sha, context):
     """Return the newest GitHub commit-status state for a context, if present."""
     command = [
@@ -321,7 +356,7 @@ def github_status_context(commit_sha, context):
         return None
     for status in response.get("statuses") or []:
         if status.get("context") == context:
-            return str(status.get("state") or "").lower()
+            return _text(status.get("state") or "").lower()
     return None
 
 
@@ -346,26 +381,26 @@ def github_actions_run(commit_sha):
 
     matches = []
     for run in response.get("workflow_runs") or []:
-        if str(run.get("head_sha") or "") != commit_sha:
+        if _text(run.get("head_sha") or "") != commit_sha:
             continue
-        path = str(run.get("path") or "")
-        name = str(run.get("name") or "")
+        path = _text(run.get("path") or "")
+        name = _text(run.get("name") or "")
         if not (path.endswith(".github/workflows/tests-single.yml") or
                 name == "Tests (single)"):
             continue
         matches.append(run)
     if not matches:
         return None
-    matches.sort(key=lambda value: str(value.get("created_at") or ""), reverse=True)
+    matches.sort(key=lambda value: _text(value.get("created_at") or ""), reverse=True)
     run = matches[0]
-    status = str(run.get("status") or "").lower()
-    conclusion = str(run.get("conclusion") or "").lower()
+    status = _text(run.get("status") or "").lower()
+    conclusion = _text(run.get("conclusion") or "").lower()
     state = conclusion if status == "completed" else status
     return {
         "state": state or "unknown",
         "run_id": run.get("id"),
-        "run_url": str(run.get("html_url") or ""),
-        "run_created_at": str(run.get("created_at") or ""),
+        "run_url": _text(run.get("html_url") or ""),
+        "run_created_at": _text(run.get("created_at") or ""),
     }
 
 
@@ -388,9 +423,9 @@ def github_active_single_test_runs():
         return None
     result = {}
     for run in response.get("workflow_runs") or []:
-        path = str(run.get("path") or "")
-        state = str(run.get("status") or "").lower()
-        head = str(run.get("head_sha") or "")
+        path = _text(run.get("path") or "")
+        state = _text(run.get("status") or "").lower()
+        head = _text(run.get("head_sha") or "")
         if not path.endswith(".github/workflows/tests-single.yml") or \
                 state not in ("queued", "in_progress", "waiting", "requested", "pending") or \
                 not head:
@@ -399,8 +434,8 @@ def github_active_single_test_runs():
             "state": state,
             "ci_head": head,
             "run_id": run.get("id"),
-            "run_url": str(run.get("html_url") or ""),
-            "run_created_at": str(run.get("created_at") or ""),
+            "run_url": _text(run.get("html_url") or ""),
+            "run_created_at": _text(run.get("created_at") or ""),
         }
         existing = result.get(head)
         if existing is None or candidate["run_created_at"] > existing["run_created_at"]:
@@ -499,12 +534,12 @@ def completion_issue_state(task_id, branch_name):
         log("%s must exist in exactly one completion folder on %s" % (
             task_id, branch_name))
         return None
-    status = str(issue.get("status") or "").lower()
+    status = _text(issue.get("status") or "").lower()
     expected_status = PENDING_STATUS if pending_issue is not None else "fixed"
     if status != expected_status:
         return None
 
-    resolved = str(issue.get("resolvedUtc") or "").strip()
+    resolved = _text(issue.get("resolvedUtc") or "").strip()
     if status == PENDING_STATUS and resolved:
         log("%s on %s is pending but already has resolvedUtc" % (task_id, branch_name))
         return None
@@ -512,33 +547,26 @@ def completion_issue_state(task_id, branch_name):
         log("%s on %s is fixed but missing resolvedUtc" % (task_id, branch_name))
         return None
 
-    summary = str(issue.get("resolutionSummary") or "").strip()
+    summary = _text(issue.get("resolutionSummary") or "").strip()
     if not summary:
         log("%s on %s says %s but has no resolutionSummary" % (
             task_id, branch_name, status))
         return None
 
     required = ("regressionTest", "fixCommit")
-    missing = [key for key in required if not str(issue.get(key) or "").strip()]
+    missing = [key for key in required if not _text(issue.get(key) or "").strip()]
     if missing:
         log("%s on %s says pending but is missing %s" % (
             task_id, branch_name, ", ".join(missing)))
         return None
-    if not commit_is_on_branch(str(issue["fixCommit"]).strip(), branch_name):
+    if not commit_is_on_branch(_text(issue["fixCommit"]).strip(), branch_name):
         log("%s has fixCommit %s that is not on %s" % (
             task_id, issue["fixCommit"], branch_name))
         return None
-    folder = "pending" if pending_issue is not None else "closed"
-    verification_path = "SceneIssues/%s/%s/verification-final.png" % (folder, task_id)
-    if not path_exists_at_ref(ref_name, verification_path):
-        log("%s on %s is missing %s" % (
-            task_id, branch_name, verification_path))
-        return None
-
     return {
         "status": status,
         "branch_head": branch_head(branch_name),
-        "fix_commit": str(issue.get("fixCommit") or "").strip(),
+        "fix_commit": _text(issue.get("fixCommit") or "").strip(),
     }
 
 
@@ -558,24 +586,55 @@ def closed_issue_state_on_master(task_id):
     """Return terminal metadata when master authoritatively contains a valid closed issue."""
     closed_path = "SceneIssues/closed/%s/issue.json" % task_id
     issue = read_json_at_ref(QUEUE_REF, closed_path)
-    if issue is None or str(issue.get("status") or "").lower() != "fixed":
+    if issue is None or _text(issue.get("status") or "").lower() != "fixed":
         return None
     if read_json_at_ref(QUEUE_REF, "SceneIssues/open/%s/issue.json" % task_id) is not None or \
             read_json_at_ref(QUEUE_REF, "SceneIssues/pending/%s/issue.json" % task_id) is not None:
         return None
     required = ("resolvedUtc", "resolutionSummary", "regressionTest", "fixCommit")
-    if any(not str(issue.get(key) or "").strip() for key in required):
+    if any(not _text(issue.get(key) or "").strip() for key in required):
         return None
-    fix_commit = str(issue.get("fixCommit") or "").strip()
-    verification_path = "SceneIssues/closed/%s/verification-final.png" % task_id
-    if not commit_is_on_ref(fix_commit, QUEUE_REF) or \
-            not path_exists_at_ref(QUEUE_REF, verification_path):
+    fix_commit = _text(issue.get("fixCommit") or "").strip()
+    if not commit_is_on_ref(fix_commit, QUEUE_REF):
         return None
     unused_code, stdout, unused_stderr = run_git(["rev-parse", QUEUE_REF])
     return {
         "status": "fixed",
         "branch_head": stdout.strip(),
         "fix_commit": fix_commit,
+    }
+
+
+def closed_queue_state_on_master(task_id):
+    """Return authoritative queue completion even when its audit metadata is invalid.
+
+    A capture that exists only under closed/ must not retain a live worker lease. The
+    stricter closed_issue_state_on_master check remains the audit path; this fallback
+    records why the closed capture could not pass that audit while still releasing the
+    agent to work on an actually open capture.
+    """
+    closed_path = "SceneIssues/closed/%s/issue.json" % task_id
+    issue = read_json_at_ref(QUEUE_REF, closed_path)
+    if issue is None or _text(issue.get("status") or "").lower() != "fixed":
+        return None
+    if read_json_at_ref(QUEUE_REF, "SceneIssues/open/%s/issue.json" % task_id) is not None or \
+            read_json_at_ref(QUEUE_REF, "SceneIssues/pending/%s/issue.json" % task_id) is not None:
+        return None
+
+    warnings = []
+    required = ("resolvedUtc", "resolutionSummary", "regressionTest", "fixCommit")
+    missing = [key for key in required if not _text(issue.get(key) or "").strip()]
+    if missing:
+        warnings.append("missing metadata: %s" % ", ".join(missing))
+    fix_commit = _text(issue.get("fixCommit") or "").strip()
+    if fix_commit and not commit_is_on_ref(fix_commit, QUEUE_REF):
+        warnings.append("fixCommit is not on %s" % QUEUE_REF)
+    unused_code, stdout, unused_stderr = run_git(["rev-parse", QUEUE_REF])
+    return {
+        "status": "fixed",
+        "branch_head": stdout.strip(),
+        "fix_commit": fix_commit,
+        "audit_warnings": warnings or ["strict closed-capture validation failed"],
     }
 
 
@@ -600,7 +659,8 @@ def _assign(task_id, agent_name, branch_name, ci_branch_name, registry, now):
             "owner": previous.get("owner"),
             "claimed_at": previous.get("claimed_at"),
             "last_heartbeat": previous.get("last_heartbeat"),
-            "ended_as": "stale",
+            "ended_as": "stale" if previous.get("status") == "in_progress"
+                        else previous.get("status"),
         })
     registry["tasks"][task_id] = {
         "status": "in_progress",
@@ -621,7 +681,10 @@ def claim_new_task(agent_name, branch_name, ci_branch_name, registry, open_tasks
     now = time.time() if now is None else now
     for task_id in sorted(open_tasks):
         info = registry["tasks"].get(task_id)
-        if info is None:
+        if info is None or info.get("status") != "in_progress":
+            if info is not None:
+                log("reopening %s because it is present in the authoritative open queue" %
+                    task_id)
             _assign(task_id, agent_name, branch_name, ci_branch_name, registry, now)
             return task_id
         if info.get("status") == "in_progress":
@@ -654,6 +717,13 @@ def mark_prompted(task_id, registry, now=None):
         info["prompt_confirmed"] = True
 
 
+def mark_prompt_attempted(task_id, registry):
+    """Make an unconfirmed UI submission eligible for an immediate retry."""
+    info = registry["tasks"].get(task_id)
+    if info and info.get("status") == "in_progress":
+        info["prompt_confirmed"] = False
+
+
 def mark_response_active(task_id, registry):
     """Remember a response that must be followed as soon as the tab becomes idle."""
     info = registry["tasks"].get(task_id)
@@ -683,8 +753,8 @@ def nudge_interval(info):
 
 
 def should_nudge(info, now=None):
-    gate_state = str((info.get("completion_gate") or {}).get("state") or "")
-    activity_state = str((info.get("ci_activity") or {}).get("state") or "")
+    gate_state = _text((info.get("completion_gate") or {}).get("state") or "")
+    activity_state = _text((info.get("ci_activity") or {}).get("state") or "")
     active_states = ("queued", "in_progress", "waiting", "requested", "pending")
     if gate_state in active_states or activity_state in active_states:
         return False
@@ -716,8 +786,14 @@ def reconcile_assignments(registry, now=None):
         if info.get("status") != "in_progress":
             continue
         terminal = closed_issue_state_on_master(task_id)
+        if terminal is None:
+            terminal = closed_queue_state_on_master(task_id)
         if terminal:
             mark_terminal(task_id, registry, terminal, now=now)
+            if terminal.get("audit_warnings"):
+                info["completion_audit_warnings"] = terminal["audit_warnings"]
+                log("%s is closed on master with audit warning(s): %s" % (
+                    task_id, "; ".join(terminal["audit_warnings"])))
             log("%s is closed on master; releasing %s" % (
                 task_id, info.get("owner")))
             changed = True
@@ -781,16 +857,79 @@ def configure_ui():
 
 
 def switch_to_tab(number):
-    key_down = globals()["keyDown"]
-    key_up = globals()["keyUp"]
+    """Select the exact browser tab without leaving Cmd held down.
+
+    Passing the modifier with the number makes press/type/release one Sikuli action.
+    Explicit keyUp calls clean up any modifier left behind by an interrupted action.
+    """
     type_value = globals()["type"]
     key = globals()["Key"]
-    key_down(key.CMD)
-    type_value(str(number))
-    key_up(key.CMD)
-    globals()["wait"](1)
+
+    for candidate in (key.CMD, key.CTRL):
+        try:
+            globals()["keyUp"](candidate)
+        except Exception:
+            pass
+    try:
+        type_value(str(number), key.CMD)
+    finally:
+        try:
+            globals()["keyUp"](key.CMD)
+        except Exception:
+            pass
+
+    globals()["wait"](TAB_SETTLE_SECONDS)
     type_value(key.END)
     globals()["wait"](1)
+
+
+def release_all_keys():
+    """Release every modifier before a shortcut or submission retry."""
+    key_up = globals().get("keyUp")
+    if not key_up:
+        return
+    try:
+        key_up()
+        return
+    except Exception:
+        pass
+    key = globals().get("Key")
+    if not key:
+        return
+    for name in ("CMD", "CTRL", "SHIFT", "ALT"):
+        modifier = getattr(key, name, None)
+        if modifier is not None:
+            try:
+                key_up(modifier)
+            except Exception:
+                pass
+
+
+def park_mouse():
+    """Move the pointer off action buttons so hover styling cannot foil matching."""
+    try:
+        center_mouse()
+    except Exception:
+        pass
+
+
+def capture_ui_diagnostic(label):
+    """Save the lower browser area for post-mortem UI-state inspection."""
+    screen = globals().get("SCREEN")
+    if screen is None:
+        return None
+    try:
+        if not os.path.isdir(DIAGNOSTICS_PATH):
+            os.makedirs(DIAGNOSTICS_PATH)
+        height = min(420, int(screen.h))
+        image = screen.capture(0, int(screen.h) - height, int(screen.w), height)
+        filename = "%s-%s" % (time.strftime("%Y%m%d-%H%M%S"), label)
+        path = image.save(DIAGNOSTICS_PATH, filename)
+        log("saved UI diagnostic: %s" % path)
+        return path
+    except Exception as error:
+        log("could not save UI diagnostic %s: %s" % (label, error))
+        return None
 
 
 def image_exists(filename, timeout=None):
@@ -808,7 +947,8 @@ def click_image(filename, timeout=None):
 
 def recover_long_conversation(agent_name, registry):
     """Start a fresh chat when the conversation-length action is visible."""
-    if not image_exists("new_chat.png", 1) or not click_image("new_chat.png", 2):
+    if not image_exists("new_chat.png", UI_STATE_TIMEOUT_SECONDS) or \
+            not click_image("new_chat.png", UI_STATE_TIMEOUT_SECONDS):
         return False
     globals()["wait"](2)
     task_id = get_agent_task(agent_name, registry)
@@ -832,7 +972,7 @@ def task_prompt(number, task_id):
 
 Follow `AGENTS.md` and the canonical `SceneIssues/README.md`. Keep `plan.md` concise and evidence-driven: inspect every marked region, discriminate competing hypotheses, tie repros to captured runtime evidence, add a behavioral regression, and check blast radius and cost.
 
-After green exact-SHA CI, commit `verification-final.png` and complete pending metadata on `{branch}`. Then move `SceneIssues/pending/{task_id}` to `SceneIssues/closed/{task_id}`, set status=`fixed` and `resolvedUtc`, merge current `origin/master` into `{branch}`, and push that exact branch head to `origin/master` non-force. If master advanced, fetch, merge, and retry. Do not modify another capture, edit `.github/test-request.json` on the feature branch, create extra CI transports, replace queued CI, or start another issue.""".format(
+After green exact-SHA CI, complete pending metadata on `{branch}`. Then move `SceneIssues/pending/{task_id}` to `SceneIssues/closed/{task_id}`, set status=`fixed` and `resolvedUtc`, merge current `origin/master` into `{branch}`, and push that exact branch head to `origin/master` non-force. If master advanced, fetch, merge, and retry. Do not modify another capture, edit `.github/test-request.json` on the feature branch, create extra CI transports, replace queued CI, or start another issue.""".format(
         name=name,
         task_id=task_id,
         branch=branch_name,
@@ -896,20 +1036,82 @@ def message_for_nudge(number, task_id, info, started_new_chat=False):
     return continuation_prompt(number, task_id, info)
 
 
-def send_message(text):
-    match = image_exists("textbox.png", 3)
-    if not match:
+def focus_textbox():
+    """Focus either an empty composer or one whose placeholder is hidden by text."""
+    match = image_exists("textbox.png", UI_STATE_TIMEOUT_SECONDS)
+    if match:
+        globals()["click"](match)
+        return True
+
+    submit = image_exists("submit.png", UI_STATE_TIMEOUT_SECONDS)
+    if not submit:
         return False
-    globals()["click"](match)
+    try:
+        center = submit.getCenter()
+        target = globals()["Location"](center.x - 180, center.y)
+    except Exception:
+        return False
+    globals()["click"](target)
+    return True
+
+
+def composer_visible():
+    """Recognize both the empty placeholder and a non-empty, submittable draft."""
+    if image_exists("textbox.png", UI_STATE_TIMEOUT_SECONDS):
+        return True
+    return bool(image_exists("submit.png", UI_STATE_TIMEOUT_SECONDS))
+
+
+def replace_composer_text(text):
+    """Replace stale drafts or leaked tab digits instead of appending to them."""
+    if not focus_textbox():
+        return False
+    key = globals()["Key"]
+    try:
+        globals()["type"]("a", key.CMD)
+    finally:
+        try:
+            globals()["keyUp"](key.CMD)
+        except Exception:
+            pass
     paste_value = globals().get("paste")
     if paste_value:
         paste_value(text)
     else:
         globals()["type"](text)
-    globals()["wait"](0.5)
-    if not click_image("submit.png", 2):
+    # A long clipboard paste can reach the browser before React enables Submit.
+    globals()["wait"](2)
+    return True
+
+
+def submit_current_message():
+    """Click Submit, then use Enter if the click did not start a response."""
+    clicked = click_image("submit.png", UI_STATE_TIMEOUT_SECONDS)
+    park_mouse()
+    if clicked and image_exists(RUNNING_IMAGE, 4):
+        return True
+
+    log("Submit click was not confirmed; retrying from the textbox with Enter")
+    if focus_textbox():
+        release_all_keys()
         globals()["type"](globals()["Key"].ENTER)
-    if image_exists("in_progress.png", 8):
+        park_mouse()
+    if image_exists(RUNNING_IMAGE, 8):
+        return True
+
+    # One final click covers a composer that enabled Submit only after the Enter retry.
+    clicked = click_image("submit.png", 2)
+    park_mouse()
+    if clicked and image_exists(RUNNING_IMAGE, 5):
+        return True
+
+    return False
+
+
+def send_message(text):
+    if not replace_composer_text(text):
+        return False
+    if submit_current_message():
         return True
     log("message submission was not confirmed by a running-response control")
     return False
@@ -934,8 +1136,8 @@ def validate_configuration():
     if not os.path.isdir(PENDING_SCENE_ISSUES_PATH):
         problems.append("pending SceneIssues queue does not exist: %s" %
                         PENDING_SCENE_ISSUES_PATH)
-    for image in ("textbox.png", "submit.png", "in_progress.png", "new_chat.png",
-                  "connection_lost.png", "refresh.png"):
+    for image in ("textbox.png", "submit.png", RUNNING_IMAGE, "new_chat.png",
+                  "got_it.png", "connection_lost.png", "refresh.png"):
         path = os.path.join(SCRIPT_DIR, image)
         if not os.path.isfile(path):
             problems.append("missing UI image: %s" % path)
@@ -959,18 +1161,54 @@ def handle_tab(number, registry, open_tasks):
     name = agent_id(number)
     switch_to_tab(number)
     started_new_chat = recover_long_conversation(name, registry)
+    task_id = get_agent_task(name, registry)
 
-    if image_exists("connection_lost.png", 1):
+    if image_exists("connection_lost.png", UI_STATE_TIMEOUT_SECONDS):
         log("%s has a connection interruption; refreshing" % name)
         click_image("refresh.png", 2)
         globals()["wait"](2)
         return
-    if image_exists("got_it.png", 1):
-        click_image("got_it.png", 2)
-        globals()["wait"](10)
+    if image_exists("got_it.png", UI_STATE_TIMEOUT_SECONDS) and \
+            click_image("got_it.png", UI_STATE_TIMEOUT_SECONDS):
+        park_mouse()
+        globals()["wait"](TAB_SETTLE_SECONDS)
+        capture_ui_diagnostic("got-it-dismissed-agent-%d" % number)
+        if not task_id:
+            log("%s dismissed Got it but has no current assignment; restored draft was not sent" %
+                name)
+            # Fall through so the normal idle-agent path can claim a new task now.
+        else:
+            # ChatGPT may restore a draft from an earlier assignment. Never submit it
+            # blindly: replace it with the registry's current task and branch context.
+            info = registry["tasks"][task_id]
+            text = message_for_nudge(number, task_id, info, started_new_chat=True)
+            mark_prompt_attempted(task_id, registry)
+            submitted = send_message(text)
+            if not submitted:
+                capture_ui_diagnostic("got-it-submit-unconfirmed-agent-%d" % number)
+                submit_visible = bool(image_exists("submit.png", 0))
+                textbox_visible = bool(image_exists("textbox.png", 0))
+                running_visible = bool(image_exists(RUNNING_IMAGE, 0))
+                log("%s post-Got-it submission unconfirmed: textbox=%s submit=%s running=%s" % (
+                    name, textbox_visible, submit_visible, running_visible))
+                if textbox_visible and submit_visible and not running_visible:
+                    # This is the observed failure state: the correct text is present and
+                    # Submit is enabled, but the first action was lost. Let the settled UI
+                    # breathe once more and submit the existing text without repasting it.
+                    globals()["wait"](2)
+                    submitted = submit_current_message()
 
-    busy = bool(image_exists("in_progress.png", 1))
-    task_id = get_agent_task(name, registry)
+            if submitted:
+                heartbeat(task_id, registry)
+                mark_prompted(task_id, registry)
+                mark_response_active(task_id, registry)
+                log("%s replaced the restored draft and resumed %s" % (name, task_id))
+            else:
+                capture_ui_diagnostic("got-it-submit-failed-agent-%d" % number)
+                log("%s post-Got-it submission failed after the settled-state retry" % name)
+            return
+
+    busy = bool(image_exists(RUNNING_IMAGE, UI_STATE_TIMEOUT_SECONDS))
 
     if busy:
         if task_id:
@@ -987,6 +1225,7 @@ def handle_tab(number, registry, open_tasks):
             name, feature_branch(number), ci_branch(number), registry, open_tasks)
         if not task_id:
             return
+        mark_prompt_attempted(task_id, registry)
         save_registry(registry)
         if send_message(task_prompt(number, task_id)):
             heartbeat(task_id, registry)
@@ -999,13 +1238,14 @@ def handle_tab(number, registry, open_tasks):
         return
 
 
-    textbox_visible = bool(image_exists("textbox.png", 1))
+    textbox_visible = composer_visible()
     if textbox_visible:
         heartbeat(task_id, registry)
     info = registry["tasks"][task_id]
     became_idle = response_became_idle(info, textbox_visible)
     if started_new_chat or became_idle or should_nudge(info):
         text = message_for_nudge(number, task_id, info, started_new_chat)
+        mark_prompt_attempted(task_id, registry)
         if textbox_visible and send_message(text):
             mark_prompted(task_id, registry)
             mark_response_active(task_id, registry)
@@ -1032,8 +1272,9 @@ def coordinator_loop():
                     last_fetch = now
                     log("remote queue has %d open task(s)" % len(open_tasks))
                 except Exception as error:
-                    log("remote sync failed; retaining assignments and assigning nothing new: %s" % error)
-                    open_tasks = []
+                    log("remote sync failed; coordinator is exiting: %s" % error)
+                    traceback.print_exc()
+                    return
 
             for number in range(1, NUM_AGENTS + 1):
                 try:
