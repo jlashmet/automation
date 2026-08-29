@@ -740,9 +740,16 @@ def _tab_state(number, registry, now):
     tabs = registry.setdefault("tabs", {})
     tab = tabs.setdefault(str(number), {})
     if "last_submit" not in tab:
-        # The previous release tracked many kinds of UI activity. It cannot tell us
-        # when the last real submission happened, so start the new submit clock now.
-        tab["last_submit"] = now
+        owner = agent_id(number)
+        prompted = max([
+            float(info.get("last_prompted") or 0)
+            for info in registry.get("tasks", {}).values()
+            if info.get("owner") == owner
+        ] or [0])
+        legacy_activity = float(tab.get("last_activity") or 0)
+        # Prefer recorded successful prompts. For an idle legacy tab with no task
+        # history, retain its previous timestamp only as a one-time migration baseline.
+        tab["last_submit"] = prompted or legacy_activity or now
     return tab
 
 
@@ -751,6 +758,12 @@ def mark_tab_submission(number, registry, now=None):
     now = time.time() if now is None else now
     tab = _tab_state(number, registry, now)
     tab["last_submit"] = now
+    tab["last_activity"] = now  # compatibility mirror; refresh decisions ignore this field
+
+
+def mark_tab_activity(number, registry, now=None):
+    """Compatibility alias: only an actual submission should call this going forward."""
+    mark_tab_submission(number, registry, now=now)
 
 
 def mark_tab_refresh(number, registry, now=None):
@@ -758,6 +771,7 @@ def mark_tab_refresh(number, registry, now=None):
     now = time.time() if now is None else now
     tab = _tab_state(number, registry, now)
     tab["last_refresh"] = now
+    tab["last_activity"] = now  # legacy diagnostic/test mirror; not an activity source
 
 
 def tab_needs_refresh(number, registry, now=None):
