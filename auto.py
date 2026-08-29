@@ -738,8 +738,15 @@ def heartbeat(task_id, registry, now=None):
 def _tab_state(number, registry, now):
     """Return per-tab submit/refresh state, migrating the old activity timestamp once."""
     tabs = registry.setdefault("tabs", {})
-    tab = tabs.setdefault(str(number), {})
+    key = str(number)
+    had_tab_state = key in tabs
+    tab = tabs.setdefault(key, {})
     if "last_submit" not in tab:
+        if not had_tab_state:
+            # A fresh registry has no trustworthy prior tab timestamp. Start its
+            # 30-minute clock now instead of immediately refreshing on old task data.
+            tab["last_submit"] = now
+            return tab
         owner = agent_id(number)
         prompted = max([
             float(info.get("last_prompted") or 0)
