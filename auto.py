@@ -55,7 +55,7 @@ POLL_WAIT_SECONDS = 5
 FETCH_INTERVAL_SECONDS = 30
 TAB_SETTLE_SECONDS = 5
 UI_STATE_TIMEOUT_SECONDS = 5
-TAB_REFRESH_AFTER_SECONDS = 30 * 60     # refresh after 30 minutes without tab activity
+TAB_REFRESH_AFTER_SECONDS = 30 * 60     # refresh after 30 minutes without a submitted message
 STALE_SECONDS = 60 * 60                # reclaim after one hour without a visible live tab
 NUDGE_INTERVAL_SECONDS = 10 * 60
 MAX_NUDGE_INTERVAL_SECONDS = 30 * 60
@@ -735,33 +735,80 @@ def heartbeat(task_id, registry, now=None):
         info["last_heartbeat"] = time.time() if now is None else now
 
 
-def mark_tab_activity(number, registry, now=None):
-    """Record visible or coordinator-driven activity for a browser tab."""
+def _tab_state(number, registry, now):
+    """Return per-tab submit/refresh state, migrating the old activity timestamp once."""
     tabs = registry.setdefault("tabs", {})
-    tabs[str(number)] = {
-        "last_activity": time.time() if now is None else now,
-    }
+    key = str(number)
+    had_tab_state = key in tabs
+    tab = tabs.setdefault(key, {})
+    if "last_submit" not in tab:
+        if not had_tab_state:
+            # A fresh registry has no trustworthy prior tab timestamp. Start its
+            # 30-minute clock now instead of immediately refreshing on old task data.
+            tab["last_submit"] = now
+            return tab
+        owner = agent_id(number)
+        prompted = max([
+            float(info.get("last_prompted") or 0)
+            for info in registry.get("tasks", {}).values()
+            if info.get("owner") == owner
+        ] or [0])
+        legacy_activity = float(tab.get("last_activity") or 0)
+        # Prefer recorded successful prompts. For an idle legacy tab with no task
+        # history, retain its previous timestamp only as a one-time migration baseline.
+        tab["last_submit"] = prompted or legacy_activity or now
+    return tab
+
+
+def mark_tab_submission(number, registry, now=None):
+    """Record a successfully confirmed message submission for a browser tab."""
+    now = time.time() if now is None else now
+    tab = _tab_state(number, registry, now)
+    tab["last_submit"] = now
+    tab["last_activity"] = now  # compatibility mirror; refresh decisions ignore this field
+
+
+def mark_tab_activity(number, registry, now=None):
+    """Compatibility alias: only an actual submission should call this going forward."""
+    mark_tab_submission(number, registry, now=now)
+
+
+def mark_tab_refresh(number, registry, now=None):
+    """Record a page refresh without treating it as user/coordinator activity."""
+    now = time.time() if now is None else now
+    tab = _tab_state(number, registry, now)
+    tab["last_refresh"] = now
+    tab["last_activity"] = now  # legacy diagnostic/test mirror; not an activity source
 
 
 def tab_needs_refresh(number, registry, now=None):
-    """Return whether a tab has been idle long enough to warrant a page refresh.
+    """Return whether 30 minutes passed without a submitted message.
 
-    A missing timestamp is initialized instead of causing an immediate refresh when
-    an existing registry is first upgraded to include per-tab activity tracking.
+    A refresh has its own cooldown so a tab with no new submissions is refreshed at
+    most once per interval. Refreshing never changes last_submit.
     """
     now = time.time() if now is None else now
-    tabs = registry.setdefault("tabs", {})
-    tab = tabs.setdefault(str(number), {"last_activity": now})
-    last_activity = float(tab.get("last_activity") or 0)
-    return now - last_activity >= TAB_REFRESH_AFTER_SECONDS
+    tab = _tab_state(number, registry, now)
+    last_submit = float(tab.get("last_submit") or 0)
+    last_refresh = float(tab.get("last_refresh") or 0)
+    return now - max(last_submit, last_refresh) >= TAB_REFRESH_AFTER_SECONDS
 
 
 def mark_prompted(task_id, registry, now=None):
     info = registry["tasks"].get(task_id)
     if info and info.get("status") == "in_progress":
-        info["last_prompted"] = time.time() if now is None else now
+        prompted_at = time.time() if now is None else now
+        info["last_prompted"] = prompted_at
         info["prompt_count"] = int(info.get("prompt_count") or 0) + 1
         info["prompt_confirmed"] = True
+        owner = _text(info.get("owner") or "")
+        if owner.startswith("agent-"):
+            try:
+                number = int(owner.split("-", 1)[1])
+            except ValueError:
+                number = None
+            if number is not None:
+                mark_tab_submission(number, registry, now=prompted_at)
 
 
 def mark_prompt_attempted(task_id, registry):
@@ -1243,19 +1290,16 @@ def handle_tab(number, registry, open_tasks):
     name = agent_id(number)
     switch_to_tab(number)
     started_new_chat = recover_long_conversation(name, registry)
-    if started_new_chat:
-        mark_tab_activity(number, registry)
     task_id = get_agent_task(name, registry)
 
     if image_exists("connection_lost.png", UI_STATE_TIMEOUT_SECONDS):
         log("%s has a connection interruption; refreshing" % name)
         click_image("refresh.png", 2)
         globals()["wait"](2)
-        mark_tab_activity(number, registry)
+        mark_tab_refresh(number, registry)
         return
     if image_exists("got_it.png", UI_STATE_TIMEOUT_SECONDS) and \
             click_image("got_it.png", UI_STATE_TIMEOUT_SECONDS):
-        mark_tab_activity(number, registry)
         park_mouse()
         globals()["wait"](TAB_SETTLE_SECONDS)
         capture_ui_diagnostic("got-it-dismissed-agent-%d" % number)
@@ -1296,17 +1340,16 @@ def handle_tab(number, registry, open_tasks):
 
     busy = bool(image_exists(RUNNING_IMAGE, UI_STATE_TIMEOUT_SECONDS))
 
+    if tab_needs_refresh(number, registry):
+        log("%s has had no submitted message for 30 minutes; refreshing the page" % name)
+        refresh_tab_page()
+        mark_tab_refresh(number, registry)
+        return
+
     if busy:
-        mark_tab_activity(number, registry)
         if task_id:
             heartbeat(task_id, registry)
             mark_response_active(task_id, registry)
-        return
-
-    if tab_needs_refresh(number, registry):
-        log("%s has had no activity for 30 minutes; refreshing the page" % name)
-        refresh_tab_page()
-        mark_tab_activity(number, registry)
         return
 
     if not task_id:
@@ -1321,7 +1364,6 @@ def handle_tab(number, registry, open_tasks):
         mark_prompt_attempted(task_id, registry)
         save_registry(registry)
         if send_message(task_prompt(number, task_id)):
-            mark_tab_activity(number, registry)
             heartbeat(task_id, registry)
             mark_prompted(task_id, registry)
             mark_response_active(task_id, registry)
@@ -1337,13 +1379,10 @@ def handle_tab(number, registry, open_tasks):
         heartbeat(task_id, registry)
     info = registry["tasks"][task_id]
     became_idle = response_became_idle(info, textbox_visible)
-    if became_idle:
-        mark_tab_activity(number, registry)
     if started_new_chat or became_idle or should_nudge(info):
         text = message_for_nudge(number, task_id, info, started_new_chat)
         mark_prompt_attempted(task_id, registry)
         if textbox_visible and send_message(text):
-            mark_tab_activity(number, registry)
             mark_prompted(task_id, registry)
             mark_response_active(task_id, registry)
             log("nudged %s on %s" % (name, task_id))
