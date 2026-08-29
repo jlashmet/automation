@@ -50,8 +50,6 @@ jobs:
                   tab["last_submit"] = prompted or legacy_activity or now
               return tab
           '''
-          replacement = '\n'.join(line[10:] if line.startswith('          ') else line
-                                  for line in replacement.splitlines()) + '\n'
           path.write_text(text[:start] + replacement + text[end:])
           PY
       - run: python -m unittest -v
