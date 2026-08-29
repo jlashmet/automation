@@ -432,6 +432,51 @@ class RegistryTests(unittest.TestCase):
             ("wait", 1),
         ], events)
 
+    def test_tab_refresh_clock_initializes_and_expires_after_thirty_minutes(self):
+        registry = {"version": 1, "tasks": {}}
+
+        self.assertFalse(auto.tab_needs_refresh(4, registry, now=100))
+        self.assertFalse(auto.tab_needs_refresh(
+            4, registry, now=100 + auto.TAB_REFRESH_AFTER_SECONDS - 1))
+        self.assertTrue(auto.tab_needs_refresh(
+            4, registry, now=100 + auto.TAB_REFRESH_AFTER_SECONDS))
+
+        auto.mark_tab_activity(4, registry, now=2000)
+        self.assertFalse(auto.tab_needs_refresh(4, registry, now=2001))
+        self.assertEqual(2000, registry["tabs"]["4"]["last_activity"])
+
+    def test_idle_tab_is_refreshed_after_thirty_minutes(self):
+        registry = {
+            "version": 1,
+            "tasks": {},
+            "tabs": {"6": {"last_activity": 1}},
+        }
+        events = []
+        replacements = {
+            "switch_to_tab": lambda number: events.append(("tab", number)),
+            "recover_long_conversation": lambda name, unused_registry: False,
+            "image_exists": lambda filename, timeout: False,
+            "refresh_tab_page": lambda: events.append(("refresh",)),
+        }
+        missing = object()
+        previous = {name: getattr(auto, name, missing) for name in replacements}
+        for name, value in replacements.items():
+            setattr(auto, name, value)
+
+        def restore():
+            for name, value in previous.items():
+                if value is missing:
+                    delattr(auto, name)
+                else:
+                    setattr(auto, name, value)
+
+        self.addCleanup(restore)
+
+        auto.handle_tab(6, registry, [])
+
+        self.assertEqual([("tab", 6), ("refresh",)], events)
+        self.assertGreater(registry["tabs"]["6"]["last_activity"], 1)
+
     def test_failed_prompt_attempt_is_immediately_retryable(self):
         registry = {"tasks": {"capture": {
             "status": "in_progress",

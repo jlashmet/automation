@@ -55,6 +55,7 @@ POLL_WAIT_SECONDS = 5
 FETCH_INTERVAL_SECONDS = 30
 TAB_SETTLE_SECONDS = 5
 UI_STATE_TIMEOUT_SECONDS = 5
+TAB_REFRESH_AFTER_SECONDS = 30 * 60     # refresh after 30 minutes without tab activity
 STALE_SECONDS = 60 * 60                # reclaim after one hour without a visible live tab
 NUDGE_INTERVAL_SECONDS = 10 * 60
 MAX_NUDGE_INTERVAL_SECONDS = 30 * 60
@@ -734,6 +735,27 @@ def heartbeat(task_id, registry, now=None):
         info["last_heartbeat"] = time.time() if now is None else now
 
 
+def mark_tab_activity(number, registry, now=None):
+    """Record visible or coordinator-driven activity for a browser tab."""
+    tabs = registry.setdefault("tabs", {})
+    tabs[str(number)] = {
+        "last_activity": time.time() if now is None else now,
+    }
+
+
+def tab_needs_refresh(number, registry, now=None):
+    """Return whether a tab has been idle long enough to warrant a page refresh.
+
+    A missing timestamp is initialized instead of causing an immediate refresh when
+    an existing registry is first upgraded to include per-tab activity tracking.
+    """
+    now = time.time() if now is None else now
+    tabs = registry.setdefault("tabs", {})
+    tab = tabs.setdefault(str(number), {"last_activity": now})
+    last_activity = float(tab.get("last_activity") or 0)
+    return now - last_activity >= TAB_REFRESH_AFTER_SECONDS
+
+
 def mark_prompted(task_id, registry, now=None):
     info = registry["tasks"].get(task_id)
     if info and info.get("status") == "in_progress":
@@ -906,6 +928,21 @@ def switch_to_tab(number):
     globals()["wait"](TAB_SETTLE_SECONDS)
     type_value(key.END)
     globals()["wait"](1)
+
+
+def refresh_tab_page():
+    """Refresh the selected browser tab and wait for its UI to settle."""
+    release_all_keys()
+    type_value = globals()["type"]
+    key = globals()["Key"]
+    try:
+        type_value("r", key.CMD)
+    finally:
+        try:
+            globals()["keyUp"](key.CMD)
+        except Exception:
+            pass
+    globals()["wait"](TAB_SETTLE_SECONDS)
 
 
 def release_all_keys():
@@ -1206,15 +1243,19 @@ def handle_tab(number, registry, open_tasks):
     name = agent_id(number)
     switch_to_tab(number)
     started_new_chat = recover_long_conversation(name, registry)
+    if started_new_chat:
+        mark_tab_activity(number, registry)
     task_id = get_agent_task(name, registry)
 
     if image_exists("connection_lost.png", UI_STATE_TIMEOUT_SECONDS):
         log("%s has a connection interruption; refreshing" % name)
         click_image("refresh.png", 2)
         globals()["wait"](2)
+        mark_tab_activity(number, registry)
         return
     if image_exists("got_it.png", UI_STATE_TIMEOUT_SECONDS) and \
             click_image("got_it.png", UI_STATE_TIMEOUT_SECONDS):
+        mark_tab_activity(number, registry)
         park_mouse()
         globals()["wait"](TAB_SETTLE_SECONDS)
         capture_ui_diagnostic("got-it-dismissed-agent-%d" % number)
@@ -1256,9 +1297,16 @@ def handle_tab(number, registry, open_tasks):
     busy = bool(image_exists(RUNNING_IMAGE, UI_STATE_TIMEOUT_SECONDS))
 
     if busy:
+        mark_tab_activity(number, registry)
         if task_id:
             heartbeat(task_id, registry)
             mark_response_active(task_id, registry)
+        return
+
+    if tab_needs_refresh(number, registry):
+        log("%s has had no activity for 30 minutes; refreshing the page" % name)
+        refresh_tab_page()
+        mark_tab_activity(number, registry)
         return
 
     if not task_id:
@@ -1273,6 +1321,7 @@ def handle_tab(number, registry, open_tasks):
         mark_prompt_attempted(task_id, registry)
         save_registry(registry)
         if send_message(task_prompt(number, task_id)):
+            mark_tab_activity(number, registry)
             heartbeat(task_id, registry)
             mark_prompted(task_id, registry)
             mark_response_active(task_id, registry)
@@ -1288,10 +1337,13 @@ def handle_tab(number, registry, open_tasks):
         heartbeat(task_id, registry)
     info = registry["tasks"][task_id]
     became_idle = response_became_idle(info, textbox_visible)
+    if became_idle:
+        mark_tab_activity(number, registry)
     if started_new_chat or became_idle or should_nudge(info):
         text = message_for_nudge(number, task_id, info, started_new_chat)
         mark_prompt_attempted(task_id, registry)
         if textbox_visible and send_message(text):
+            mark_tab_activity(number, registry)
             mark_prompted(task_id, registry)
             mark_response_active(task_id, registry)
             log("nudged %s on %s" % (name, task_id))
