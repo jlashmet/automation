@@ -66,6 +66,10 @@ REGISTRY_READ_RETRY_SECONDS = 0.25
 
 OPEN_STATUSES = ("", "open", "todo")
 PENDING_STATUS = "pending"
+ISSUE_WORK_KIND = "issue"
+FEATURE_WORK_KIND = "feature"
+ISSUE_WORKFLOW_PATH = "SceneIssues/issue-readme.md"
+FEATURE_WORKFLOW_PATH = "SceneIssues/feature-readme.md"
 
 _lock_owned = False
 
@@ -246,6 +250,26 @@ def list_open_tasks(ref_name=None):
         if status in OPEN_STATUSES:
             tasks.append(parts[2])
     return sorted(set(tasks))
+
+
+def scene_work_kind(task_id, ref_name=None):
+    """Classify an assignment using explicit metadata or its published note prefix."""
+    ref_name = ref_name or QUEUE_REF
+    path = "SceneIssues/open/%s/issue.json" % task_id
+    issue = read_json_at_ref(ref_name, path) or {}
+    explicit = _text(issue.get("workType") or "").strip().lower()
+    if explicit in (ISSUE_WORK_KIND, FEATURE_WORK_KIND):
+        return explicit
+    note = _text(issue.get("note") or "").lstrip().upper()
+    if note.startswith("FEATURE"):
+        return FEATURE_WORK_KIND
+    return ISSUE_WORK_KIND
+
+
+def workflow_path(work_kind):
+    if work_kind == FEATURE_WORK_KIND:
+        return FEATURE_WORKFLOW_PATH
+    return ISSUE_WORKFLOW_PATH
 
 
 def remote_ref(branch_name):
@@ -667,6 +691,7 @@ def _assign(task_id, agent_name, branch_name, ci_branch_name, registry, now):
         "owner": agent_name,
         "branch": branch_name,
         "ci_branch": ci_branch_name,
+        "work_kind": scene_work_kind(task_id),
         "claimed_at": now,
         "last_heartbeat": now,
         "last_prompted": 0,
@@ -964,23 +989,37 @@ def recover_long_conversation(agent_name, registry):
     return True
 
 
-def task_prompt(number, task_id):
+def task_prompt(number, task_id, work_kind=None):
     name = agent_id(number)
     branch_name = feature_branch(number)
     ci_branch_name = ci_branch(number)
-    return """You are {name}. Fix only `SceneIssues/open/{task_id}` on `{branch}`; use `{ci_branch}` only for its final targeted-CI request. Fetch origin and resume the feature branch, or create it from current `origin/master`.
+    work_kind = work_kind or scene_work_kind(task_id)
+    if work_kind == FEATURE_WORK_KIND:
+        directions = ("Follow `SceneIssues/feature-readme.md`. Before implementation, create and "
+                      "maintain separate `plan.md` and `tasks.md` files in the assigned folder. "
+                      "Add discovered required work to `tasks.md`; do not close the feature until "
+                      "every checkbox and acceptance criterion is complete and validated.")
+    else:
+        directions = ("Follow `SceneIssues/issue-readme.md`. Inspect every capture and marked "
+                      "region, discriminate competing hypotheses with runtime evidence, add a "
+                      "behavioral regression, and validate the exact scene in the built application.")
+    return """You are {name}. Work only on the {work_kind} assignment `SceneIssues/open/{task_id}` on `{branch}`; use `{ci_branch}` only for its final targeted-CI request. Fetch origin and resume the feature branch, or create it from current `origin/master`.
 
-Follow `AGENTS.md` and the canonical `SceneIssues/README.md`. Keep `plan.md` concise and evidence-driven: inspect every marked region, discriminate competing hypotheses, tie repros to captured runtime evidence, add a behavioral regression, and check blast radius and cost.
+Follow `AGENTS.md`. {directions} Check blast radius and cost.
 
-After green exact-SHA CI, complete pending metadata on `{branch}`. Then move `SceneIssues/pending/{task_id}` to `SceneIssues/closed/{task_id}`, set status=`fixed` and `resolvedUtc`, merge current `origin/master` into `{branch}`, and push that exact branch head to `origin/master` non-force. If master advanced, fetch, merge, and retry. Do not modify another capture, edit `.github/test-request.json` on the feature branch, create extra CI transports, replace queued CI, or start another issue.""".format(
+After every workflow gate and green exact-SHA CI, complete pending metadata on `{branch}`. Then move `SceneIssues/pending/{task_id}` to `SceneIssues/closed/{task_id}`, set status=`fixed` and `resolvedUtc`, merge current `origin/master` into `{branch}`, and push that exact branch head to `origin/master` non-force. If master advanced, fetch, merge, and retry. Do not modify another assignment, edit `.github/test-request.json` on the feature branch, create extra CI transports, replace queued CI, or self-select more work.""".format(
         name=name,
         task_id=task_id,
         branch=branch_name,
         ci_branch=ci_branch_name,
+        work_kind=work_kind,
+        directions=directions,
     )
 
 
 def continuation_prompt(number, task_id, info=None):
+    work_kind = (info or {}).get("work_kind") or scene_work_kind(task_id)
+    guide = workflow_path(work_kind)
     gate = (info or {}).get("completion_gate") or {}
     state = gate.get("state")
     ci_branch_name = gate.get("ci_branch") or ci_branch(number)
@@ -988,13 +1027,17 @@ def continuation_prompt(number, task_id, info=None):
     fix_commit = gate.get("fix_commit") or "<missing>"
 
     if state in ("close_and_merge", "merge_to_master"):
+        feature_gate = ("First confirm every `tasks.md` checkbox and every acceptance criterion "
+                        "is complete; if any is unfinished, keep the feature open or pending and "
+                        "continue the work. " if work_kind == FEATURE_WORK_KIND else "")
         close = ("Move `SceneIssues/pending/%s` to `SceneIssues/closed/%s`, set status=`fixed` "
                  "and `resolvedUtc`, and commit that bookkeeping. " % (task_id, task_id)) \
-            if state == "close_and_merge" else "The issue is already closed on your branch. "
-        return ("%s is verified. %sFetch current `origin/master`, merge it into `%s`, resolve "
+            if state == "close_and_merge" else "The assignment is already closed on your branch. "
+        return ("%s is verified. %s%sFetch current `origin/master`, merge it into `%s`, resolve "
                 "only in-scope conflicts, push the feature branch, then push its exact head to "
                 "`origin/master` non-force. If master advanced, fetch, merge, and retry; do not "
-                "wait for the coordinator." % (task_id, close, feature_branch(number)))
+                "wait for the coordinator." % (
+                    task_id, feature_gate, close, feature_branch(number)))
 
     if state == "missing_branch":
         return ("%s is fixed but `%s` is missing. Create its final request commit directly on the "
@@ -1017,9 +1060,11 @@ def continuation_prompt(number, task_id, info=None):
                 "infrastructure failure, wait and retry once; for product failure, fix it. Then "
                 "create one fresh final request and update the assigned CI ref once." % (
                     task_id, ci_branch_name, ci_head, state))
-    return ("Continue only `SceneIssues/open/%s` on `%s`; follow `SceneIssues/README.md`. Once "
-            "verified, close the issue and merge your branch to master." % (
-                task_id, feature_branch(number)))
+    checklist = (" Keep `plan.md` and `tasks.md` separate and current; do not close with any "
+                 "unchecked task." if work_kind == FEATURE_WORK_KIND else "")
+    return ("Continue only the %s assignment `SceneIssues/open/%s` on `%s`; follow `%s`.%s Once "
+            "verified, close the assignment and merge your branch to master." % (
+                work_kind, task_id, feature_branch(number), guide, checklist))
 
 
 def message_for_nudge(number, task_id, info, started_new_chat=False):
@@ -1028,11 +1073,11 @@ def message_for_nudge(number, task_id, info, started_new_chat=False):
         return continuation_prompt(number, task_id, info)
     activity = info.get("ci_activity") or {}
     if activity.get("state") in ("queued", "in_progress", "waiting", "requested", "pending"):
-        return ("Continue only scene issue %s. Its exact targeted-CI request `%s` is `%s`; "
-                "monitor it without replacing it, then close and merge the issue yourself." % (
+        return ("Continue only scene assignment %s. Its exact targeted-CI request `%s` is `%s`; "
+                "monitor it without replacing it, then close and merge the assignment yourself." % (
                     task_id, activity.get("ci_head") or "<unknown>", activity.get("state")))
     if started_new_chat or not float(info.get("last_prompted") or 0):
-        return task_prompt(number, task_id)
+        return task_prompt(number, task_id, info.get("work_kind"))
     return continuation_prompt(number, task_id, info)
 
 

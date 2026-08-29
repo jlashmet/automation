@@ -71,7 +71,7 @@ class RegistryTests(unittest.TestCase):
             "ci_activity": {"state": "queued", "ci_head": "abc123"},
         }, started_new_chat=True)
 
-        self.assertIn("Fix only `SceneIssues/open/capture`", active)
+        self.assertIn("SceneIssues/open/capture", active)
         self.assertIn("SceneIssues/closed/capture", completion)
         self.assertIn("origin/master", completion)
         self.assertIn("abc123", queued)
@@ -445,7 +445,7 @@ class RegistryTests(unittest.TestCase):
         self.assertTrue(auto.should_nudge(registry["tasks"]["capture"], now=101))
 
     def test_assignment_prompt_names_only_the_agents_persistent_branches(self):
-        prompt = auto.task_prompt(3, "20260825-capture")
+        prompt = auto.task_prompt(3, "20260825-capture", auto.ISSUE_WORK_KIND)
 
         self.assertIn("`fixes/agent-3`", prompt)
         self.assertIn("`ci-test/fixes/agent-3`", prompt)
@@ -454,9 +454,49 @@ class RegistryTests(unittest.TestCase):
         self.assertIn("SceneIssues/closed/20260825-capture", prompt)
         self.assertIn("competing hypotheses", prompt)
         self.assertIn("behavioral regression", prompt)
+        self.assertIn("SceneIssues/issue-readme.md", prompt)
         self.assertIn("exact-SHA CI", prompt)
         self.assertIn("push that exact branch head to `origin/master`", prompt)
         self.assertLessEqual(len(prompt.split()), 170)
+
+    def test_feature_assignment_uses_feature_plan_and_task_directions(self):
+        prompt = auto.task_prompt(5, "20260828-feature", auto.FEATURE_WORK_KIND)
+
+        self.assertIn("feature assignment", prompt)
+        self.assertIn("SceneIssues/feature-readme.md", prompt)
+        self.assertIn("separate `plan.md` and `tasks.md`", prompt)
+        self.assertIn("Add discovered required work", prompt)
+        self.assertIn("every checkbox and acceptance criterion", prompt)
+        self.assertNotIn("SceneIssues/issue-readme.md", prompt)
+
+    def test_scene_work_kind_prefers_metadata_then_feature_note_prefix(self):
+        previous_read = auto.read_json_at_ref
+        manifests = {
+            "explicit": {"workType": "feature", "note": "A defect"},
+            "prefixed": {"note": "FEATURE / GAMEPLAY ISSUE: add a quest"},
+            "issue": {"note": "The shoreline is jagged"},
+        }
+        auto.read_json_at_ref = lambda unused_ref, path: manifests[path.split("/")[2]]
+        self.addCleanup(setattr, auto, "read_json_at_ref", previous_read)
+
+        self.assertEqual(auto.FEATURE_WORK_KIND, auto.scene_work_kind("explicit"))
+        self.assertEqual(auto.FEATURE_WORK_KIND, auto.scene_work_kind("prefixed"))
+        self.assertEqual(auto.ISSUE_WORK_KIND, auto.scene_work_kind("issue"))
+
+    def test_feature_continuation_keeps_unfinished_tasks_open(self):
+        prompt = auto.continuation_prompt(5, "20260828-feature", {
+            "work_kind": auto.FEATURE_WORK_KIND,
+        })
+
+        self.assertIn("SceneIssues/feature-readme.md", prompt)
+        self.assertIn("do not close with any unchecked task", prompt)
+
+        close_prompt = auto.continuation_prompt(5, "20260828-feature", {
+            "work_kind": auto.FEATURE_WORK_KIND,
+            "completion_gate": {"state": "close_and_merge"},
+        })
+        self.assertIn("confirm every `tasks.md` checkbox", close_prompt)
+        self.assertIn("keep the feature open or pending", close_prompt)
 
     def test_claims_are_oldest_first_and_exclusive(self):
         registry = {"version": 1, "tasks": {}}
