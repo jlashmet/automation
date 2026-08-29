@@ -1,0 +1,81 @@
+name: Apply tab-state migration fix
+
+on:
+  push:
+    branches:
+      - fix-submit-inactivity
+
+permissions:
+  contents: write
+
+jobs:
+  patch-and-test:
+    if: github.event.head_commit.message == 'Apply tab-state migration fix'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Patch fresh-tab migration behavior
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('auto.py')
+          text = path.read_text()
+          old = '''def _tab_state(number, registry, now):
+              """Return per-tab submit/refresh state, migrating the old activity timestamp once."""
+              tabs = registry.setdefault("tabs", {})
+              tab = tabs.setdefault(str(number), {})
+              if "last_submit" not in tab:
+                  owner = agent_id(number)
+                  prompted = max([
+                      float(info.get("last_prompted") or 0)
+                      for info in registry.get("tasks", {}).values()
+                      if info.get("owner") == owner
+                  ] or [0])
+                  legacy_activity = float(tab.get("last_activity") or 0)
+                  # Prefer recorded successful prompts. For an idle legacy tab with no task
+                  # history, retain its previous timestamp only as a one-time migration baseline.
+                  tab["last_submit"] = prompted or legacy_activity or now
+              return tab
+          '''
+          new = '''def _tab_state(number, registry, now):
+              """Return per-tab submit/refresh state, migrating the old activity timestamp once."""
+              tabs = registry.setdefault("tabs", {})
+              key = str(number)
+              had_tab_state = key in tabs
+              tab = tabs.setdefault(key, {})
+              if "last_submit" not in tab:
+                  if not had_tab_state:
+                      # A fresh registry has no trustworthy prior tab timestamp. Start its
+                      # 30-minute clock now instead of immediately refreshing on old task data.
+                      tab["last_submit"] = now
+                      return tab
+                  owner = agent_id(number)
+                  prompted = max([
+                      float(info.get("last_prompted") or 0)
+                      for info in registry.get("tasks", {}).values()
+                      if info.get("owner") == owner
+                  ] or [0])
+                  legacy_activity = float(tab.get("last_activity") or 0)
+                  # Prefer recorded successful prompts. For an idle legacy tab with no task
+                  # history, retain its previous timestamp only as a one-time migration baseline.
+                  tab["last_submit"] = prompted or legacy_activity or now
+              return tab
+          '''
+          old = old.replace('          ', '')
+          new = new.replace('          ', '')
+          if old not in text:
+              raise SystemExit('expected _tab_state block not found')
+          path.write_text(text.replace(old, new, 1))
+          PY
+      - run: python -m unittest -v
+      - name: Commit tested fix
+        run: |
+          git config user.name "automation-test-bot"
+          git config user.email "automation-test-bot@users.noreply.github.com"
+          git add auto.py
+          git commit -m "Fix fresh tab inactivity baseline"
+          git push origin HEAD:fix-submit-inactivity
