@@ -1249,7 +1249,7 @@ def send_message(text):
 def center_mouse():
     screen = globals()["SCREEN"]
     location = globals()["Location"]
-    globals()["mouseMove"](location(screen.w / 2, screen.h / 2))
+    globals()["mouseMove"](location(screen.w / 6, screen.h / 6))
 
 
 # ---------------- COORDINATOR ----------------
