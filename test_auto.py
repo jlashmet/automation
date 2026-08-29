@@ -432,7 +432,7 @@ class RegistryTests(unittest.TestCase):
             ("wait", 1),
         ], events)
 
-    def test_tab_refresh_clock_initializes_and_expires_after_thirty_minutes(self):
+    def test_tab_refresh_clock_initializes_and_expires_after_twenty_minutes(self):
         registry = {"version": 1, "tasks": {}}
 
         self.assertFalse(auto.tab_needs_refresh(4, registry, now=100))
@@ -445,7 +445,7 @@ class RegistryTests(unittest.TestCase):
         self.assertFalse(auto.tab_needs_refresh(4, registry, now=2001))
         self.assertEqual(2000, registry["tabs"]["4"]["last_activity"])
 
-    def test_idle_tab_is_refreshed_after_thirty_minutes(self):
+    def test_idle_tab_is_refreshed_after_twenty_minutes(self):
         registry = {
             "version": 1,
             "tasks": {},

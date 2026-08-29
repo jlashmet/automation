@@ -55,7 +55,7 @@ POLL_WAIT_SECONDS = 5
 FETCH_INTERVAL_SECONDS = 30
 TAB_SETTLE_SECONDS = 5
 UI_STATE_TIMEOUT_SECONDS = 5
-TAB_REFRESH_AFTER_SECONDS = 30 * 60     # refresh after 30 minutes without a submitted message
+TAB_REFRESH_AFTER_SECONDS = 20 * 60     # refresh stuck-busy or inactive tabs after 20 minutes
 STALE_SECONDS = 60 * 60                # reclaim after one hour without a visible live tab
 NUDGE_INTERVAL_SECONDS = 10 * 60
 MAX_NUDGE_INTERVAL_SECONDS = 30 * 60
@@ -768,6 +768,14 @@ def mark_tab_submission(number, registry, now=None):
     tab["last_activity"] = now  # compatibility mirror; refresh decisions ignore this field
 
 
+def mark_tab_typing(number, registry, now=None):
+    """Record text successfully placed in a tab's composer."""
+    now = time.time() if now is None else now
+    tab = _tab_state(number, registry, now)
+    tab["last_typed"] = now
+    tab["last_activity"] = now
+
+
 def mark_tab_activity(number, registry, now=None):
     """Compatibility alias: only an actual submission should call this going forward."""
     mark_tab_submission(number, registry, now=now)
@@ -781,17 +789,23 @@ def mark_tab_refresh(number, registry, now=None):
     tab["last_activity"] = now  # legacy diagnostic/test mirror; not an activity source
 
 
-def tab_needs_refresh(number, registry, now=None):
-    """Return whether 30 minutes passed without a submitted message.
+def tab_needs_refresh(number, registry, now=None, busy=False):
+    """Return whether a tab has been continuously busy or inactive for 20 minutes.
 
-    A refresh has its own cooldown so a tab with no new submissions is refreshed at
-    most once per interval. Refreshing never changes last_submit.
+    A newly observed running response counts as activity, but is refreshed if it stays
+    busy for the full interval. An idle tab is refreshed after the same interval with
+    no typing or confirmed submission. Refreshes have their own cooldown.
     """
     now = time.time() if now is None else now
     tab = _tab_state(number, registry, now)
     last_submit = float(tab.get("last_submit") or 0)
+    last_typed = float(tab.get("last_typed") or 0)
     last_refresh = float(tab.get("last_refresh") or 0)
-    return now - max(last_submit, last_refresh) >= TAB_REFRESH_AFTER_SECONDS
+    if busy:
+        busy_since = float(tab.setdefault("busy_since", now))
+        return now - max(busy_since, last_refresh) >= TAB_REFRESH_AFTER_SECONDS
+    tab.pop("busy_since", None)
+    return now - max(last_submit, last_typed, last_refresh) >= TAB_REFRESH_AFTER_SECONDS
 
 
 def mark_prompted(task_id, registry, now=None):
@@ -1240,10 +1254,26 @@ def submit_current_message():
 def send_message(text):
     if not replace_composer_text(text):
         return False
+    context = globals().get("_tab_message_context")
+    if context:
+        mark_tab_typing(context[0], context[1])
     if submit_current_message():
         return True
     log("message submission was not confirmed by a running-response control")
     return False
+
+
+def send_tab_message(number, registry, text):
+    """Send through a tab while allowing successful typing to reset its idle clock."""
+    previous = globals().get("_tab_message_context")
+    globals()["_tab_message_context"] = (number, registry)
+    try:
+        return send_message(text)
+    finally:
+        if previous is None:
+            globals().pop("_tab_message_context", None)
+        else:
+            globals()["_tab_message_context"] = previous
 
 
 def center_mouse():
@@ -1313,7 +1343,7 @@ def handle_tab(number, registry, open_tasks):
             info = registry["tasks"][task_id]
             text = message_for_nudge(number, task_id, info, started_new_chat=True)
             mark_prompt_attempted(task_id, registry)
-            submitted = send_message(text)
+            submitted = send_tab_message(number, registry, text)
             if not submitted:
                 capture_ui_diagnostic("got-it-submit-unconfirmed-agent-%d" % number)
                 submit_visible = bool(image_exists("submit.png", 0))
@@ -1340,8 +1370,9 @@ def handle_tab(number, registry, open_tasks):
 
     busy = bool(image_exists(RUNNING_IMAGE, UI_STATE_TIMEOUT_SECONDS))
 
-    if tab_needs_refresh(number, registry):
-        log("%s has had no submitted message for 30 minutes; refreshing the page" % name)
+    if tab_needs_refresh(number, registry, busy=busy):
+        reason = "been continuously busy" if busy else "had no typing or submission"
+        log("%s has %s for 20 minutes; refreshing the page" % (name, reason))
         refresh_tab_page()
         mark_tab_refresh(number, registry)
         return
@@ -1363,7 +1394,7 @@ def handle_tab(number, registry, open_tasks):
             return
         mark_prompt_attempted(task_id, registry)
         save_registry(registry)
-        if send_message(task_prompt(number, task_id)):
+        if send_tab_message(number, registry, task_prompt(number, task_id)):
             heartbeat(task_id, registry)
             mark_prompted(task_id, registry)
             mark_response_active(task_id, registry)
@@ -1382,7 +1413,7 @@ def handle_tab(number, registry, open_tasks):
     if started_new_chat or became_idle or should_nudge(info):
         text = message_for_nudge(number, task_id, info, started_new_chat)
         mark_prompt_attempted(task_id, registry)
-        if textbox_visible and send_message(text):
+        if textbox_visible and send_tab_message(number, registry, text):
             mark_prompted(task_id, registry)
             mark_response_active(task_id, registry)
             log("nudged %s on %s" % (name, task_id))
