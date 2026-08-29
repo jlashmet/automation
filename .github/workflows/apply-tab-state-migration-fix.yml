@@ -24,24 +24,9 @@ jobs:
 
           path = Path('auto.py')
           text = path.read_text()
-          old = '''def _tab_state(number, registry, now):
-              """Return per-tab submit/refresh state, migrating the old activity timestamp once."""
-              tabs = registry.setdefault("tabs", {})
-              tab = tabs.setdefault(str(number), {})
-              if "last_submit" not in tab:
-                  owner = agent_id(number)
-                  prompted = max([
-                      float(info.get("last_prompted") or 0)
-                      for info in registry.get("tasks", {}).values()
-                      if info.get("owner") == owner
-                  ] or [0])
-                  legacy_activity = float(tab.get("last_activity") or 0)
-                  # Prefer recorded successful prompts. For an idle legacy tab with no task
-                  # history, retain its previous timestamp only as a one-time migration baseline.
-                  tab["last_submit"] = prompted or legacy_activity or now
-              return tab
-          '''
-          new = '''def _tab_state(number, registry, now):
+          start = text.index('def _tab_state(number, registry, now):\n')
+          end = text.index('\n\ndef mark_tab_submission', start)
+          replacement = '''def _tab_state(number, registry, now):
               """Return per-tab submit/refresh state, migrating the old activity timestamp once."""
               tabs = registry.setdefault("tabs", {})
               key = str(number)
@@ -65,11 +50,9 @@ jobs:
                   tab["last_submit"] = prompted or legacy_activity or now
               return tab
           '''
-          old = old.replace('          ', '')
-          new = new.replace('          ', '')
-          if old not in text:
-              raise SystemExit('expected _tab_state block not found')
-          path.write_text(text.replace(old, new, 1))
+          replacement = '\n'.join(line[10:] if line.startswith('          ') else line
+                                  for line in replacement.splitlines()) + '\n'
+          path.write_text(text[:start] + replacement + text[end:])
           PY
       - run: python -m unittest -v
       - name: Commit tested fix
