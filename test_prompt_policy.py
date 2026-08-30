@@ -5,13 +5,25 @@ import os
 import unittest
 
 
-MODULE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auto.py")
+MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODULE_PATH = os.path.join(MODULE_DIR, "auto.py")
 SPEC = importlib.util.spec_from_file_location("scene_issue_auto_prompt_policy", MODULE_PATH)
 auto = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(auto)
 
 
 class PromptPolicyTests(unittest.TestCase):
+    def test_bootstrap_without_dunder_file(self):
+        with open(MODULE_PATH, "rb") as handle:
+            source = handle.read()
+        namespace = {
+            "__name__": "scene_issue_auto_no_file_test",
+            "getBundlePath": lambda: MODULE_DIR,
+        }
+        exec(compile(source, "auto.py", "exec"), namespace, namespace)
+        self.assertIn("task_prompt", namespace)
+        self.assertTrue(namespace["_CORE_PATH"].endswith("auto_core.py"))
+
     def test_feature_prompt_keeps_work_bounded_and_reusable(self):
         prompt = auto.task_prompt(4, "feature-id", auto.FEATURE_WORK_KIND)
         self.assertIn("SceneIssues/README.md", prompt)
