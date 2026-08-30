@@ -15,19 +15,17 @@ class PromptPolicyTests(unittest.TestCase):
     def test_feature_prompt_keeps_work_bounded_and_reusable(self):
         prompt = auto.task_prompt(4, "feature-id", auto.FEATURE_WORK_KIND)
         self.assertIn("SceneIssues/README.md", prompt)
-        self.assertIn("SceneIssues/feature-readme.md", prompt)
+        self.assertNotIn("SceneIssues/feature-readme.md", prompt)
         self.assertIn("do not add opportunistic enhancements", prompt)
         self.assertIn("next unchecked", prompt)
         self.assertIn("semantic/config-driven", prompt)
         self.assertIn("same gate fails twice", prompt)
 
-    def test_issue_prompt_treats_legacy_guide_as_non_blocking(self):
+    def test_issue_prompt_uses_canonical_guide(self):
         prompt = auto.task_prompt(2, "issue-id", auto.ISSUE_WORK_KIND)
         self.assertIn("SceneIssues/README.md", prompt)
-        self.assertIn("SceneIssues/issue-readme.md", prompt)
-        self.assertIn("optional/legacy", prompt)
-        self.assertIn("do not search", prompt)
-        self.assertLessEqual(len(prompt.split()), 170)
+        self.assertNotIn("SceneIssues/issue-readme.md", prompt)
+        self.assertLessEqual(len(prompt.split()), 160)
 
     def test_completed_ci_failure_reuses_only_assigned_transport(self):
         prompt = auto.continuation_prompt(9, "water", {
@@ -48,6 +46,8 @@ class PromptPolicyTests(unittest.TestCase):
         self.assertIn("SceneIssues/open/feature-id", prompt)
         self.assertIn("SceneIssues/pending/feature-id", prompt)
         self.assertIn("do not move it backward", prompt)
+        self.assertIn("SceneIssues/README.md", prompt)
+        self.assertNotIn("feature-readme", prompt)
         self.assertIn("next unchecked", prompt)
 
 
