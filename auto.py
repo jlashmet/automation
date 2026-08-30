@@ -41,11 +41,11 @@ def task_prompt(number, task_id, work_kind=None):
     else:
         directions = (
             fallback +
-            "Inspect captures/marked regions, discriminate competing hypotheses with runtime "
-            "evidence, add a behavioral regression, validate the built scene, and check blast "
-            "radius/cost. Work the next non-blocked acceptance item; record blockers and continue "
-            "independent work. If the same gate fails twice, isolate a minimal repro/root cause "
-            "before another speculative fix.")
+            "Inspect captures/marked regions, discriminate competing hypotheses with evidence, "
+            "add a behavioral regression, validate the scene, and check blast radius/cost. Work "
+            "the next non-blocked acceptance item; record blockers and continue independent work. "
+            "If the same gate fails twice, isolate a minimal repro/root cause before another "
+            "speculative fix.")
     return """You are {name}. Work only on the {work_kind} assignment `SceneIssues/open/{task_id}` on `{branch}`; `{ci_branch}` is the only targeted-CI transport. Fetch origin and resume the branch, or create it from `origin/master`.
 
 Follow `AGENTS.md`. {directions}
