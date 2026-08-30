@@ -23,8 +23,8 @@ def task_prompt(number, task_id, work_kind=None):
     ci_branch_name = ci_branch(number)
     work_kind = work_kind or scene_work_kind(task_id)
     guide = workflow_path(work_kind)
-    fallback = ("Follow `%s` if present; otherwise use `SceneIssues/README.md` without treating "
-                "the missing guide as work or a blocker. " % guide)
+    fallback = ("Use `SceneIssues/README.md`; `%s` is optional/legacy, so if absent do not search "
+                "for it or treat it as a blocker. " % guide)
     if work_kind == FEATURE_WORK_KIND:
         directions = (
             fallback +
@@ -115,10 +115,10 @@ def continuation_prompt(number, task_id, info=None):
              if work_kind == FEATURE_WORK_KIND else "")
     return ("Continue only the %s assignment %s on `%s`; it may currently be under "
             "`SceneIssues/open/%s` or `SceneIssues/pending/%s`, so do not move it backward because "
-            "of prompt wording. Follow `%s` if present; otherwise use `SceneIssues/README.md` and "
-            "continue.%s%s If the same gate has failed twice, isolate a minimal repro/root cause "
-            "before another speculative fix. Once verified, close the assignment and merge your "
-            "branch to master." % (
+            "of prompt wording. Use `SceneIssues/README.md`; `%s` is optional/legacy, so if absent "
+            "do not search for it.%s%s If the same gate has failed twice, isolate a minimal "
+            "repro/root cause before another speculative fix. Once verified, close the assignment "
+            "and merge your branch to master." % (
                 work_kind, task_id, feature_branch(number), task_id, task_id, guide, checklist,
                 reuse))
 
