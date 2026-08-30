@@ -72,33 +72,35 @@ jobs:
                   raise SystemExit("task_prompt marker not found")
               text = text.replace(marker, "\n" + helper + marker, 1)
 
-          old = '''    if not task_id:
-              if branch_has_unmerged_work(feature_branch(number)):
-                  log("%s is idle but %s has unmerged work; assigning nothing" % (
-                      name, feature_branch(number)))
-                  return
-              task_id = claim_new_task(
-          '''
-          new = '''    if not task_id:
-              branch_name = feature_branch(number)
-              head = branch_head(branch_name)
-              if head and branch_has_unmerged_work(branch_name):
-                  if should_prompt_branch_cleanup(registry, name, branch_name, head):
-                      if send_tab_message(number, registry, branch_cleanup_prompt(number, head)):
-                          mark_branch_cleanup_prompted(registry, name, branch_name, head)
-                          save_registry(registry)
-                          log("directed %s to finish unmerged work on %s at %s" % (
-                              name, branch_name, head))
-                      else:
-                          log("%s has unmerged work on %s but its textbox was not visible; will retry" % (
-                              name, branch_name))
-                  return
-              if clear_branch_cleanup(registry, name):
-                  save_registry(registry)
-                  log("%s cleanup is complete; %s is now fully represented on master" % (
-                      name, branch_name))
-              task_id = claim_new_task(
-          '''
+          old = (
+              "    if not task_id:\n"
+              "        if branch_has_unmerged_work(feature_branch(number)):\n"
+              "            log(\"%s is idle but %s has unmerged work; assigning nothing\" % (\n"
+              "                name, feature_branch(number)))\n"
+              "            return\n"
+              "        task_id = claim_new_task(\n"
+          )
+          new = (
+              "    if not task_id:\n"
+              "        branch_name = feature_branch(number)\n"
+              "        head = branch_head(branch_name)\n"
+              "        if head and branch_has_unmerged_work(branch_name):\n"
+              "            if should_prompt_branch_cleanup(registry, name, branch_name, head):\n"
+              "                if send_tab_message(number, registry, branch_cleanup_prompt(number, head)):\n"
+              "                    mark_branch_cleanup_prompted(registry, name, branch_name, head)\n"
+              "                    save_registry(registry)\n"
+              "                    log(\"directed %s to finish unmerged work on %s at %s\" % (\n"
+              "                        name, branch_name, head))\n"
+              "                else:\n"
+              "                    log(\"%s has unmerged work on %s but its textbox was not visible; will retry\" % (\n"
+              "                        name, branch_name))\n"
+              "            return\n"
+              "        if clear_branch_cleanup(registry, name):\n"
+              "            save_registry(registry)\n"
+              "            log(\"%s cleanup is complete; %s is now fully represented on master\" % (\n"
+              "                name, branch_name))\n"
+              "        task_id = claim_new_task(\n"
+          )
           if old not in text:
               raise SystemExit("idle/unmerged block not found")
           path.write_text(text.replace(old, new, 1))
