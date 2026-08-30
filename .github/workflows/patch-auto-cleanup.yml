@@ -21,53 +21,92 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
+
           path = Path("auto.py")
           text = path.read_text()
           marker = "\ndef task_prompt(number, task_id, work_kind=None):\n"
           helper = r'''
-def branch_cleanup_prompt(number, head=None):
-    name = agent_id(number)
-    branch_name = feature_branch(number)
-    return """You are {name}. Do not start another SceneIssue yet. `{branch}` still has work that is not on current `origin/master`{head_text}. Finish and reconcile that existing work now.
+          def branch_cleanup_prompt(number, head=None):
+              name = agent_id(number)
+              branch_name = feature_branch(number)
+              return """You are {name}. Do not start another SceneIssue yet. `{branch}` still has work that is not on current `origin/master`{head_text}. Finish and reconcile that existing work now.
 
-Fetch origin and inspect the branch-only commits/diff against current `origin/master`. Preserve valid task-specific work from your prior assignment; do not blindly merge stale branch state, reopen closed SceneIssues, overwrite newer master work, or discard unique valid work just to make the branch look clean. Complete any remaining implementation, validation, SceneIssue bookkeeping, and required exact-SHA CI for that prior work.
+          Fetch origin and inspect the branch-only commits/diff against current `origin/master`. Identify what belongs to your prior assignment. Preserve and integrate valid task-specific work, but do not blindly merge stale branch history, reopen an already closed SceneIssue just to clear the branch, overwrite newer master work, or discard unique valid work. Complete any remaining implementation, validation, bookkeeping, and required exact-SHA CI for valid retained work.
 
-Then merge current `origin/master` into `{branch}`, resolve only the prior assignment's in-scope conflicts, push `{branch}`, and push its exact reconciled head to `origin/master` non-force when it is valid and verified. If master advanced, fetch, merge, and retry. Keep working until every valid branch-only change is either correctly integrated on master or intentionally reconciled as obsolete/superseded, and `{branch}` no longer contains unmerged work. Do not wait for the coordinator and do not begin a new issue.""".format(name=name, branch=branch_name, head_text=(" at `%s`" % head) if head else "")
-
-
-def should_prompt_branch_cleanup(registry, agent_name, branch_name, head, now=None):
-    cleanup = (registry.get("branch_cleanup") or {}).get(agent_name) or {}
-    if cleanup.get("branch") != branch_name or cleanup.get("head") != head:
-        return True
-    now = time.time() if now is None else now
-    return now - float(cleanup.get("last_prompted") or 0) >= NUDGE_INTERVAL_SECONDS
+          If useful work remains, reconcile/rebuild that valid delta on top of current `origin/master`, then push the verified reconciled head to `origin/master` non-force. After all intended work is safely on master, make `{branch}` point at the current `origin/master` head; force-with-lease is allowed only for this feature branch if needed to discard obsolete branch history. Never force-push `origin/master`. Keep working until `{branch}` has no commits outside `origin/master`, then stop and let the coordinator assign new work.""".format(
+                  name=name,
+                  branch=branch_name,
+                  head_text=(" at `%s`" % head) if head else "",
+              )
 
 
-def mark_branch_cleanup_prompted(registry, agent_name, branch_name, head, now=None):
-    cleanup = registry.setdefault("branch_cleanup", {})
-    cleanup[agent_name] = {"branch": branch_name, "head": head, "last_prompted": time.time() if now is None else now}
+          def should_prompt_branch_cleanup(registry, agent_name, branch_name, head, now=None):
+              cleanup = (registry.get("branch_cleanup") or {}).get(agent_name) or {}
+              if cleanup.get("branch") != branch_name or cleanup.get("head") != head:
+                  return True
+              now = time.time() if now is None else now
+              return now - float(cleanup.get("last_prompted") or 0) >= NUDGE_INTERVAL_SECONDS
 
 
-def clear_branch_cleanup(registry, agent_name):
-    cleanup = registry.get("branch_cleanup") or {}
-    if agent_name in cleanup:
-        cleanup.pop(agent_name, None)
-        if not cleanup:
-            registry.pop("branch_cleanup", None)
-        return True
-    return False
+          def mark_branch_cleanup_prompted(registry, agent_name, branch_name, head, now=None):
+              cleanup = registry.setdefault("branch_cleanup", {})
+              cleanup[agent_name] = {
+                  "branch": branch_name,
+                  "head": head,
+                  "last_prompted": time.time() if now is None else now,
+              }
 
-'''
+
+          def clear_branch_cleanup(registry, agent_name):
+              cleanup = registry.get("branch_cleanup") or {}
+              if agent_name in cleanup:
+                  cleanup.pop(agent_name, None)
+                  if not cleanup:
+                      registry.pop("branch_cleanup", None)
+                  return True
+              return False
+
+          '''
           if "def branch_cleanup_prompt(" not in text:
+              if marker not in text:
+                  raise SystemExit("task_prompt marker not found")
               text = text.replace(marker, "\n" + helper + marker, 1)
-          old = '''    if not task_id:\n        if branch_has_unmerged_work(feature_branch(number)):\n            log("%s is idle but %s has unmerged work; assigning nothing" % (\n                name, feature_branch(number)))\n            return\n        task_id = claim_new_task(\n'''
-          new = '''    if not task_id:\n        branch_name = feature_branch(number)\n        head = branch_head(branch_name)\n        if head and branch_has_unmerged_work(branch_name):\n            if should_prompt_branch_cleanup(registry, name, branch_name, head):\n                if send_tab_message(number, registry, branch_cleanup_prompt(number, head)):\n                    mark_branch_cleanup_prompted(registry, name, branch_name, head)\n                    save_registry(registry)\n                    log("directed %s to finish unmerged work on %s at %s" % (name, branch_name, head))\n                else:\n                    log("%s has unmerged work on %s but its textbox was not visible; will retry" % (name, branch_name))\n            return\n        if clear_branch_cleanup(registry, name):\n            save_registry(registry)\n            log("%s cleanup is complete; %s is now fully represented on master" % (name, branch_name))\n        task_id = claim_new_task(\n'''
+
+          old = '''    if not task_id:
+              if branch_has_unmerged_work(feature_branch(number)):
+                  log("%s is idle but %s has unmerged work; assigning nothing" % (
+                      name, feature_branch(number)))
+                  return
+              task_id = claim_new_task(
+          '''
+          new = '''    if not task_id:
+              branch_name = feature_branch(number)
+              head = branch_head(branch_name)
+              if head and branch_has_unmerged_work(branch_name):
+                  if should_prompt_branch_cleanup(registry, name, branch_name, head):
+                      if send_tab_message(number, registry, branch_cleanup_prompt(number, head)):
+                          mark_branch_cleanup_prompted(registry, name, branch_name, head)
+                          save_registry(registry)
+                          log("directed %s to finish unmerged work on %s at %s" % (
+                              name, branch_name, head))
+                      else:
+                          log("%s has unmerged work on %s but its textbox was not visible; will retry" % (
+                              name, branch_name))
+                  return
+              if clear_branch_cleanup(registry, name):
+                  save_registry(registry)
+                  log("%s cleanup is complete; %s is now fully represented on master" % (
+                      name, branch_name))
+              task_id = claim_new_task(
+          '''
           if old not in text:
               raise SystemExit("idle/unmerged block not found")
           path.write_text(text.replace(old, new, 1))
           PY
-      - name: Validate syntax
-        run: python -m py_compile auto.py
+      - name: Validate coordinator
+        run: |
+          python -m py_compile auto.py
+          python -m unittest -q test_auto.py test_folder_state.py
       - name: Commit patch and remove temporary workflow
         run: |
           git config user.name "github-actions[bot]"
