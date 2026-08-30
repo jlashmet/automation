@@ -8,8 +8,26 @@ from __future__ import print_function
 import os
 import sys
 
-_CORE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auto_core.py")
-_ENTRY_NAME = __name__
+
+def _bootstrap_script_dir():
+    """Locate adjacent files under CPython and Oculix/SikuliX/Jython."""
+    file_name = globals().get("__file__")
+    if file_name:
+        return os.path.dirname(os.path.abspath(file_name))
+    get_bundle_path = globals().get("getBundlePath")
+    if get_bundle_path:
+        bundle_path = get_bundle_path()
+        if bundle_path:
+            return os.path.abspath(str(bundle_path))
+    if sys.argv and sys.argv[0]:
+        candidate = os.path.abspath(str(sys.argv[0]))
+        if os.path.isfile(candidate):
+            return os.path.dirname(candidate)
+    return os.getcwd()
+
+
+_CORE_PATH = os.path.join(_bootstrap_script_dir(), "auto_core.py")
+_ENTRY_NAME = globals().get("__name__", "__main__")
 globals()["__name__"] = "scene_issue_auto_core"
 with open(_CORE_PATH, "rb") as _core_handle:
     _core_code = compile(_core_handle.read(), _CORE_PATH, "exec")
@@ -118,7 +136,7 @@ def continuation_prompt(number, task_id, info=None):
                 reuse))
 
 
-if __name__ == "__main__":
+if globals().get("__name__") == "__main__":
     if "--check" in sys.argv:
         check_only()
     else:
