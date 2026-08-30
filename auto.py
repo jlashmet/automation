@@ -22,25 +22,26 @@ def task_prompt(number, task_id, work_kind=None):
     branch_name = feature_branch(number)
     ci_branch_name = ci_branch(number)
     work_kind = work_kind or scene_work_kind(task_id)
+    guide = workflow_path(work_kind)
     if work_kind == FEATURE_WORK_KIND:
         directions = (
-            "Use `SceneIssues/README.md`. Before implementation, create and maintain separate "
-            "`plan.md` and `tasks.md` files in the assigned folder. Add discovered required work "
-            "to `tasks.md` only when required by acceptance, correctness/regression, reuse "
-            "boundaries, or a demonstrated quality defect; do not add opportunistic enhancements. "
-            "Work the next unchecked non-blocked task; record blockers and continue independent "
-            "work. Do not close until every checkbox and acceptance criterion is complete and "
-            "validated. Keep shared APIs semantic/config-driven and scene/place/material-ID-specific "
-            "policy in composition; prove reuse with an independent consumer/fixture when practical. "
-            "If the same gate fails twice, isolate a minimal repro/root cause before another "
-            "speculative fix.")
+            "Follow `%s` plus common `SceneIssues/README.md` rules. Before implementation, create "
+            "and maintain separate `plan.md` and `tasks.md` files in the assigned folder. Add "
+            "discovered required work to `tasks.md` only when required by acceptance, "
+            "correctness/regression, reuse boundaries, or a demonstrated quality defect; do not add "
+            "opportunistic enhancements. Work the next unchecked non-blocked task; record blockers "
+            "and continue independent work. Do not close until every checkbox and acceptance "
+            "criterion is complete and validated. Keep shared APIs semantic/config-driven and "
+            "scene/place/material-ID-specific policy in composition; prove reuse with an independent "
+            "consumer/fixture when practical. If the same gate fails twice, isolate a minimal "
+            "repro/root cause before another speculative fix." % guide)
     else:
         directions = (
-            "Use `SceneIssues/README.md`. Inspect captures/marked regions, discriminate competing "
-            "hypotheses with evidence, add a behavioral regression, validate the scene, and check "
-            "blast radius/cost. Work the next non-blocked acceptance item; record blockers and "
-            "continue independent work. If the same gate fails twice, isolate a minimal repro/root "
-            "cause before another speculative fix.")
+            "Follow `%s` plus common `SceneIssues/README.md` rules. Inspect captures/marked regions, "
+            "discriminate competing hypotheses with evidence, add a behavioral regression, validate "
+            "the scene, and check blast radius/cost. Work the next non-blocked acceptance item; "
+            "record blockers and continue independent work. If the same gate fails twice, isolate a "
+            "minimal repro/root cause before another speculative fix." % guide)
     return """You are {name}. Work only on the {work_kind} assignment `SceneIssues/open/{task_id}` on `{branch}`; `{ci_branch}` is the only targeted-CI transport. Fetch origin and resume the branch, or create it from `origin/master`.
 
 Follow `AGENTS.md`. {directions}
@@ -59,6 +60,7 @@ After green exact-SHA CI, complete pending metadata on `{branch}`; move `SceneIs
 
 def continuation_prompt(number, task_id, info=None):
     work_kind = (info or {}).get("work_kind") or scene_work_kind(task_id)
+    guide = workflow_path(work_kind)
     gate = (info or {}).get("completion_gate") or {}
     state = gate.get("state")
     ci_branch_name = gate.get("ci_branch") or ci_branch(number)
@@ -109,10 +111,11 @@ def continuation_prompt(number, task_id, info=None):
              if work_kind == FEATURE_WORK_KIND else "")
     return ("Continue only the %s assignment %s on `%s`; it may currently be under "
             "`SceneIssues/open/%s` or `SceneIssues/pending/%s`, so do not move it backward because "
-            "of prompt wording. Use `SceneIssues/README.md`.%s%s If the same gate has failed twice, "
-            "isolate a minimal repro/root cause before another speculative fix. Once verified, "
-            "close the assignment and merge your branch to master." % (
-                work_kind, task_id, feature_branch(number), task_id, task_id, checklist, reuse))
+            "of prompt wording. Follow `%s` plus common `SceneIssues/README.md` rules.%s%s If the "
+            "same gate has failed twice, isolate a minimal repro/root cause before another "
+            "speculative fix. Once verified, close the assignment and merge your branch to master." % (
+                work_kind, task_id, feature_branch(number), task_id, task_id, guide, checklist,
+                reuse))
 
 
 if __name__ == "__main__":
