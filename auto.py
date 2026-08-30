@@ -65,7 +65,6 @@ RUNNING_IMAGE = "in_progress_glyph.png"
 REGISTRY_READ_ATTEMPTS = 5
 REGISTRY_READ_RETRY_SECONDS = 0.25
 
-OPEN_STATUSES = ("", "open", "todo")
 PENDING_STATUS = "pending"
 ISSUE_WORK_KIND = "issue"
 FEATURE_WORK_KIND = "feature"
@@ -231,26 +230,37 @@ def read_json_at_ref(ref_name, repo_relative_path):
     return value if isinstance(value, dict) else None
 
 
+def path_exists_at_ref(ref_name, repo_relative_path):
+    code, unused_stdout, unused_stderr = run_git(
+        ["cat-file", "-e", "%s:%s" % (ref_name, repo_relative_path)], check=False)
+    return code == 0
+
+
 def list_open_tasks(ref_name=None):
-    """Return capture-directory names that are open on the queue ref."""
+    """Return tasks whose authoritative queue folder is open on the queue ref.
+
+    Folder location is the state source of truth. If a task is accidentally present in
+    more than one queue folder, closed wins over pending, and pending wins over open, so
+    the coordinator never sends an agent back to work on a completed assignment.
+    """
     ref_name = ref_name or QUEUE_REF
-    unused_code, stdout, unused_stderr = run_git(
-        ["ls-tree", "-r", "--name-only", ref_name, "--", "SceneIssues/open"])
-    tasks = []
+    unused_code, stdout, unused_stderr = run_git([
+        "ls-tree", "-r", "--name-only", ref_name, "--",
+        "SceneIssues/open", "SceneIssues/pending", "SceneIssues/closed",
+    ])
+    states = {}
+    precedence = {"open": 1, "pending": 2, "closed": 3}
     for path in stdout.splitlines():
-        if not path.startswith("SceneIssues/open/") or not path.endswith("/issue.json"):
-            continue
         parts = path.split("/")
-        if len(parts) != 4:
+        if len(parts) != 4 or parts[0] != "SceneIssues" or \
+                parts[1] not in precedence or parts[3] != "issue.json":
             continue
-        issue = read_json_at_ref(ref_name, path)
-        if issue is None:
-            log("ignoring invalid issue JSON at %s:%s" % (ref_name, path))
-            continue
-        status = _text(issue.get("status") or "").lower()
-        if status in OPEN_STATUSES:
-            tasks.append(parts[2])
-    return sorted(set(tasks))
+        task_id = parts[2]
+        folder = parts[1]
+        current = states.get(task_id)
+        if current is None or precedence[folder] > precedence[current]:
+            states[task_id] = folder
+    return sorted(task_id for task_id, folder in states.items() if folder == "open")
 
 
 def scene_work_kind(task_id, ref_name=None):
@@ -631,22 +641,26 @@ def closed_issue_state_on_master(task_id):
 
 
 def closed_queue_state_on_master(task_id):
-    """Return authoritative queue completion even when its audit metadata is invalid.
+    """Return authoritative queue completion based only on closed/ membership.
 
-    A capture that exists only under closed/ must not retain a live worker lease. The
-    stricter closed_issue_state_on_master check remains the audit path; this fallback
-    records why the closed capture could not pass that audit while still releasing the
-    agent to work on an actually open capture.
+    Metadata is retained as audit information, but it cannot keep a worker assigned to
+    a task that master has already placed under SceneIssues/closed. If duplicate queue
+    entries exist, closed is authoritative and the duplicates are reported as warnings.
     """
     closed_path = "SceneIssues/closed/%s/issue.json" % task_id
-    issue = read_json_at_ref(QUEUE_REF, closed_path)
-    if issue is None or _text(issue.get("status") or "").lower() != "fixed":
-        return None
-    if read_json_at_ref(QUEUE_REF, "SceneIssues/open/%s/issue.json" % task_id) is not None or \
-            read_json_at_ref(QUEUE_REF, "SceneIssues/pending/%s/issue.json" % task_id) is not None:
+    if not path_exists_at_ref(QUEUE_REF, closed_path):
         return None
 
+    issue = read_json_at_ref(QUEUE_REF, closed_path) or {}
     warnings = []
+    status = _text(issue.get("status") or "").lower()
+    if status != "fixed":
+        warnings.append("closed folder contains status=%s" % (status or "<missing>"))
+    if path_exists_at_ref(QUEUE_REF, "SceneIssues/open/%s/issue.json" % task_id):
+        warnings.append("duplicate manifest also exists under open")
+    if path_exists_at_ref(QUEUE_REF, "SceneIssues/pending/%s/issue.json" % task_id):
+        warnings.append("duplicate manifest also exists under pending")
+
     required = ("resolvedUtc", "resolutionSummary", "regressionTest", "fixCommit")
     missing = [key for key in required if not _text(issue.get(key) or "").strip()]
     if missing:
@@ -659,7 +673,7 @@ def closed_queue_state_on_master(task_id):
         "status": "fixed",
         "branch_head": stdout.strip(),
         "fix_commit": fix_commit,
-        "audit_warnings": warnings or ["strict closed-capture validation failed"],
+        "audit_warnings": warnings,
     }
 
 
@@ -743,8 +757,6 @@ def _tab_state(number, registry, now):
     tab = tabs.setdefault(key, {})
     if "last_submit" not in tab:
         if not had_tab_state:
-            # A fresh registry has no trustworthy prior tab timestamp. Start its
-            # 30-minute clock now instead of immediately refreshing on old task data.
             tab["last_submit"] = now
             return tab
         owner = agent_id(number)
@@ -754,8 +766,6 @@ def _tab_state(number, registry, now):
             if info.get("owner") == owner
         ] or [0])
         legacy_activity = float(tab.get("last_activity") or 0)
-        # Prefer recorded successful prompts. For an idle legacy tab with no task
-        # history, retain its previous timestamp only as a one-time migration baseline.
         tab["last_submit"] = prompted or legacy_activity or now
     return tab
 
@@ -765,7 +775,7 @@ def mark_tab_submission(number, registry, now=None):
     now = time.time() if now is None else now
     tab = _tab_state(number, registry, now)
     tab["last_submit"] = now
-    tab["last_activity"] = now  # compatibility mirror; refresh decisions ignore this field
+    tab["last_activity"] = now
 
 
 def mark_tab_typing(number, registry, now=None):
@@ -786,7 +796,7 @@ def mark_tab_refresh(number, registry, now=None):
     now = time.time() if now is None else now
     tab = _tab_state(number, registry, now)
     tab["last_refresh"] = now
-    tab["last_activity"] = now  # legacy diagnostic/test mirror; not an activity source
+    tab["last_activity"] = now
 
 
 def tab_needs_refresh(number, registry, now=None, busy=False):
@@ -1143,7 +1153,7 @@ def continuation_prompt(number, task_id, info=None):
                 "`ci/single-test`." % (task_id, ci_branch_name, fix_commit))
     if state == "missing_fix":
         return ("%s is fixed, but `%s` at %s does not contain fixCommit %s. Create one fresh "
-                "request on the correct source, update the CI ref once, and monitor it." % (
+                "request on the correct source, update that CI ref once, and monitor it." % (
                     task_id, ci_branch_name, ci_head, fix_commit))
     if state == "not_created":
         return ("%s has no `ci/single-test` status for `%s` at %s. Check for an exact-SHA Actions "
@@ -1222,7 +1232,6 @@ def replace_composer_text(text):
         paste_value(text)
     else:
         globals()["type"](text)
-    # A long clipboard paste can reach the browser before React enables Submit.
     globals()["wait"](2)
     return True
 
@@ -1242,7 +1251,6 @@ def submit_current_message():
     if image_exists(RUNNING_IMAGE, 8):
         return True
 
-    # One final click covers a composer that enabled Submit only after the Enter retry.
     clicked = click_image("submit.png", 2)
     park_mouse()
     if clicked and image_exists(RUNNING_IMAGE, 5):
@@ -1336,10 +1344,7 @@ def handle_tab(number, registry, open_tasks):
         if not task_id:
             log("%s dismissed Got it but has no current assignment; restored draft was not sent" %
                 name)
-            # Fall through so the normal idle-agent path can claim a new task now.
         else:
-            # ChatGPT may restore a draft from an earlier assignment. Never submit it
-            # blindly: replace it with the registry's current task and branch context.
             info = registry["tasks"][task_id]
             text = message_for_nudge(number, task_id, info, started_new_chat=True)
             mark_prompt_attempted(task_id, registry)
@@ -1352,9 +1357,6 @@ def handle_tab(number, registry, open_tasks):
                 log("%s post-Got-it submission unconfirmed: textbox=%s submit=%s running=%s" % (
                     name, textbox_visible, submit_visible, running_visible))
                 if textbox_visible and submit_visible and not running_visible:
-                    # This is the observed failure state: the correct text is present and
-                    # Submit is enabled, but the first action was lost. Let the settled UI
-                    # breathe once more and submit the existing text without repasting it.
                     globals()["wait"](2)
                     submitted = submit_current_message()
 
@@ -1403,7 +1405,6 @@ def handle_tab(number, registry, open_tasks):
         else:
             log("%s claimed %s but its textbox was not visible; will retry" % (name, task_id))
         return
-
 
     textbox_visible = composer_visible()
     if textbox_visible:
