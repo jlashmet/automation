@@ -24,20 +24,22 @@ class PromptPolicyTests(unittest.TestCase):
         self.assertIn("task_prompt", namespace)
         self.assertTrue(namespace["_CORE_PATH"].endswith("auto_core.py"))
 
-    def test_feature_prompt_keeps_work_bounded_and_reusable(self):
+    def test_feature_prompt_is_bounded_reusable_and_two_state(self):
         prompt = auto.task_prompt(4, "feature-id", auto.FEATURE_WORK_KIND)
-        self.assertIn("SceneIssues/README.md", prompt)
         self.assertIn("SceneIssues/feature-readme.md", prompt)
-        self.assertIn("do not add opportunistic enhancements", prompt)
-        self.assertIn("next unchecked", prompt)
+        self.assertIn("no opportunistic enhancements", prompt)
         self.assertIn("semantic/config-driven", prompt)
-        self.assertIn("same gate fails twice", prompt)
+        self.assertIn("Do not refactor adjacent systems", prompt)
+        self.assertIn("SceneIssues/open/feature-id", prompt)
+        self.assertIn("SceneIssues/closed/feature-id", prompt)
+        self.assertNotIn("SceneIssues/pending/", prompt)
 
-    def test_issue_prompt_uses_issue_guide(self):
+    def test_issue_prompt_stays_concise(self):
         prompt = auto.task_prompt(2, "issue-id", auto.ISSUE_WORK_KIND)
-        self.assertIn("SceneIssues/README.md", prompt)
         self.assertIn("SceneIssues/issue-readme.md", prompt)
-        self.assertLessEqual(len(prompt.split()), 170)
+        self.assertIn("minimal repro/root cause", prompt)
+        self.assertNotIn("SceneIssues/pending/", prompt)
+        self.assertLessEqual(len(prompt.split()), 150)
 
     def test_completed_ci_failure_reuses_only_assigned_transport(self):
         prompt = auto.continuation_prompt(9, "water", {
@@ -47,20 +49,17 @@ class PromptPolicyTests(unittest.TestCase):
                 "ci_head": "abc123",
             },
         })
-        self.assertIn("completed failure", prompt)
-        self.assertIn("reuse only this assigned CI transport", prompt)
+        self.assertIn("reuse this same CI transport", prompt)
         self.assertIn("Never replace active CI", prompt)
 
-    def test_generic_continuation_is_queue_state_aware(self):
+    def test_generic_continuation_keeps_task_open_until_close(self):
         prompt = auto.continuation_prompt(5, "feature-id", {
             "work_kind": auto.FEATURE_WORK_KIND,
         })
         self.assertIn("SceneIssues/open/feature-id", prompt)
-        self.assertIn("SceneIssues/pending/feature-id", prompt)
-        self.assertIn("do not move it backward", prompt)
-        self.assertIn("SceneIssues/README.md", prompt)
-        self.assertIn("SceneIssues/feature-readme.md", prompt)
+        self.assertNotIn("SceneIssues/pending/", prompt)
         self.assertIn("next unchecked", prompt)
+        self.assertIn("external prerequisite", prompt)
 
 
 if __name__ == "__main__":
