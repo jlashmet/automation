@@ -51,8 +51,8 @@ GITHUB_REPOSITORY = "jlashmet/voxel"
 FEATURE_BRANCH_TEMPLATE = "fixes/agent-{number}"
 CI_BRANCH_TEMPLATE = "ci-test/fixes/agent-{number}"
 
-POLL_WAIT_SECONDS = 5
-FETCH_INTERVAL_SECONDS = 30
+POLL_WAIT_SECONDS = 3
+FETCH_INTERVAL_SECONDS = 10
 TAB_SETTLE_SECONDS = 5
 UI_STATE_TIMEOUT_SECONDS = 5
 TAB_REFRESH_AFTER_SECONDS = 20 * 60     # refresh stuck-busy or inactive tabs after 20 minutes
