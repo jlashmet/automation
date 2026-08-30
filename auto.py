@@ -1097,6 +1097,48 @@ def recover_long_conversation(agent_name, registry):
     return True
 
 
+
+def branch_cleanup_prompt(number, head=None):
+    name = agent_id(number)
+    branch_name = feature_branch(number)
+    return """You are {name}. Do not start another SceneIssue yet. `{branch}` still has work that is not on current `origin/master`{head_text}. Finish and reconcile that existing work now.
+
+Fetch origin and inspect the branch-only commits/diff against current `origin/master`. Identify what belongs to your prior assignment. Preserve and integrate valid task-specific work, but do not blindly merge stale branch history, reopen an already closed SceneIssue just to clear the branch, overwrite newer master work, or discard unique valid work. Complete any remaining implementation, validation, bookkeeping, and required exact-SHA CI for valid retained work.
+
+If useful work remains, reconcile/rebuild that valid delta on top of current `origin/master`, then push the verified reconciled head to `origin/master` non-force. After all intended work is safely on master, make `{branch}` point at the current `origin/master` head; force-with-lease is allowed only for this feature branch if needed to discard obsolete branch history. Never force-push `origin/master`. Keep working until `{branch}` has no commits outside `origin/master`, then stop and let the coordinator assign new work.""".format(
+        name=name,
+        branch=branch_name,
+        head_text=(" at `%s`" % head) if head else "",
+    )
+
+
+def should_prompt_branch_cleanup(registry, agent_name, branch_name, head, now=None):
+    cleanup = (registry.get("branch_cleanup") or {}).get(agent_name) or {}
+    if cleanup.get("branch") != branch_name or cleanup.get("head") != head:
+        return True
+    now = time.time() if now is None else now
+    return now - float(cleanup.get("last_prompted") or 0) >= NUDGE_INTERVAL_SECONDS
+
+
+def mark_branch_cleanup_prompted(registry, agent_name, branch_name, head, now=None):
+    cleanup = registry.setdefault("branch_cleanup", {})
+    cleanup[agent_name] = {
+        "branch": branch_name,
+        "head": head,
+        "last_prompted": time.time() if now is None else now,
+    }
+
+
+def clear_branch_cleanup(registry, agent_name):
+    cleanup = registry.get("branch_cleanup") or {}
+    if agent_name in cleanup:
+        cleanup.pop(agent_name, None)
+        if not cleanup:
+            registry.pop("branch_cleanup", None)
+        return True
+    return False
+
+
 def task_prompt(number, task_id, work_kind=None):
     name = agent_id(number)
     branch_name = feature_branch(number)
@@ -1386,10 +1428,23 @@ def handle_tab(number, registry, open_tasks):
         return
 
     if not task_id:
-        if branch_has_unmerged_work(feature_branch(number)):
-            log("%s is idle but %s has unmerged work; assigning nothing" % (
-                name, feature_branch(number)))
+        branch_name = feature_branch(number)
+        head = branch_head(branch_name)
+        if head and branch_has_unmerged_work(branch_name):
+            if should_prompt_branch_cleanup(registry, name, branch_name, head):
+                if send_tab_message(number, registry, branch_cleanup_prompt(number, head)):
+                    mark_branch_cleanup_prompted(registry, name, branch_name, head)
+                    save_registry(registry)
+                    log("directed %s to finish unmerged work on %s at %s" % (
+                        name, branch_name, head))
+                else:
+                    log("%s has unmerged work on %s but its textbox was not visible; will retry" % (
+                        name, branch_name))
             return
+        if clear_branch_cleanup(registry, name):
+            save_registry(registry)
+            log("%s cleanup is complete; %s is now fully represented on master" % (
+                name, branch_name))
         task_id = claim_new_task(
             name, feature_branch(number), ci_branch(number), registry, open_tasks)
         if not task_id:
