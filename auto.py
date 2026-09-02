@@ -30,6 +30,8 @@ with open(_CORE_PATH, "rb") as _core_handle:
     _core_code = compile(_core_handle.read(), _CORE_PATH, "exec")
 eval(_core_code, globals(), globals())
 globals()["__name__"] = _ENTRY_NAME
+_core_file_load_registry = load_registry
+_core_file_save_registry = save_registry
 
 
 # Assignment ownership is repository state, not coordinator-machine state. Keep the
@@ -144,7 +146,9 @@ def _runtime_assignment(persisted, now=None):
 
 
 def load_registry(ref_name=None, now=None):
-    """Load assignment ownership exclusively from SceneIssue issue.json files."""
+    """Load ownership from SceneIssue manifests; absolute paths retain the old unit-test seam."""
+    if ref_name and os.path.isabs(ref_name):
+        return _core_file_load_registry(ref_name)
     ref_name = ref_name or ASSIGNMENT_REF
     now = time.time() if now is None else now
     tasks = {}
@@ -239,8 +243,10 @@ def _create_assignment_commit(master_sha, parent_sha, updates):
             pass
 
 
-def save_registry(registry):
-    """Persist changed durable ownership into issue manifests on the coordination branch."""
+def save_registry(registry, path=None):
+    """Persist ownership to Git; an explicit path is retained only for legacy unit tests."""
+    if path is not None:
+        return _core_file_save_registry(registry, path)
     persisted = registry.setdefault("_persisted_assignments", {})
     dirty = []
     for task_id, info in registry.get("tasks", {}).items():
