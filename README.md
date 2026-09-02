@@ -1,8 +1,9 @@
 # Scene-issue agent coordinator
 
 `auto.py` drives up to nine Oculix/Sikuli browser tabs while using GitHub as the source of truth
-for the `SceneIssues/open/` queue, verified captures under `SceneIssues/pending/`, and completed
-captures under `SceneIssues/closed/`.
+for the `SceneIssues/open/` queue, verified captures under `SceneIssues/pending/`, completed
+captures under `SceneIssues/closed/`, and active agent assignment ownership stored in each open
+issue's `issue.json`.
 
 ## Before starting
 
@@ -11,7 +12,9 @@ captures under `SceneIssues/closed/`.
    shortcut so the permanent agent-to-tab mapping survives restarts and missed UI actions. It
    allows five seconds for the selected tab to settle before inspecting it.
 2. Ensure Java/Oculix has macOS Accessibility and Screen Recording permission.
-3. Ensure `/Users/jlashmet/code/voxel` exists, `origin` is configured, and `gh auth status` succeeds.
+3. Ensure the voxel repository exists, `origin` is configured, and `gh auth status` succeeds.
+   The historical default is `/Users/jlashmet/code/voxel`; set `VOXEL_REPO_PATH` when the clone is
+   elsewhere on another computer.
 4. Run the repository-root `./push_scene_issues.sh` from an up-to-date local `master` to publish
    newly captured issues. The coordinator intentionally reads `SceneIssues/open/` from the remote
    branch, not from uncommitted local files.
@@ -31,8 +34,12 @@ cd /Users/jlashmet/automation
 java -jar oculixide-4.0.0-macos.jar -c -r auto.py
 ```
 
-Stop it with `Ctrl+C`. It writes `_registry.json` beside the script. Run only one coordinator
-instance; this setup intentionally does not enforce a process lock.
+Stop it with `Ctrl+C`. Durable assignment state is not stored beside the automation script. The
+coordinator writes an `assignment` object into the authoritative open SceneIssue `issue.json` on
+`origin/master` before prompting a newly claimed worker. On startup it fetches the voxel repo and
+reconstructs ownership from those manifests, so the coordinator can be stopped on one computer and
+started from another clone without copying a registry file. UI heartbeat, prompt-backoff, and tab
+activity remain process-local runtime state. Do not intentionally run two coordinators at once.
 
 Each browser slot reuses its own feature and CI branches:
 
@@ -43,10 +50,18 @@ fixes/agent-2              ci-test/fixes/agent-2
 ```
 
 The oldest unclaimed capture under `origin/master:SceneIssues/open/` is assigned first. A visible
-running-response control or input box renews the task lease. A task whose tab has not been
-observable for one hour may be reassigned only when the former owner's feature branch has no work
-outside `origin/master`. Otherwise the registry records that an explicit handoff is required and
-leaves the lease in place so unfinished work is not silently stacked beneath another assignment.
+running-response control or input box renews the task's in-memory UI lease. A task whose tab has not
+been observable for one hour in the running coordinator may be reassigned only when the former
+owner's feature branch has no work outside `origin/master`. Otherwise the coordinator records that
+an explicit handoff is required in memory and leaves ownership in place so unfinished work is not
+silently stacked beneath another assignment. Assignment claims themselves are durable in the issue
+manifest and survive coordinator restarts.
+
+Assignment writes do not check out or modify the local voxel worktree. The coordinator constructs a
+child commit from the current remote master with a temporary Git index and pushes it non-force. If
+master advances or another coordinator changed the same issue assignment after the local snapshot,
+the write is retried or the newer remote assignment wins rather than double-claiming the issue.
+Heartbeat and UI-only changes do not create master commits.
 
 After selecting a tab, the coordinator scrolls to the bottom. If the conversation-length screen is
 visible, it clicks **Start new chat**, resets that task's prompt backoff, and sends either the full
@@ -103,6 +118,6 @@ fetches and merges the new master into its feature branch, then retries the non-
 The coordinator releases the tab and assigns another capture after it observes the fixed capture
 under `SceneIssues/closed/` on master. A blocked capture remains in `open/`; it is not complete.
 
-Do not delete or hand-edit `_registry.json` while the coordinator or remote workers are active. If
-recovery is necessary, stop the coordinator first and preserve a copy of the registry so active
-assignments are not duplicated.
+The `assignment` object is coordinator metadata attached to an open issue. Workers should preserve
+it when merging current master; if it travels with the issue into `closed/`, it is historical only
+and is ignored by the coordinator because folder location remains authoritative for queue state.
