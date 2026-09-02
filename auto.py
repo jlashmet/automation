@@ -1,8 +1,10 @@
-"""Coordinator entrypoint plus concise prompt-policy overrides."""
+"""Coordinator entrypoint plus concise prompt-policy and durable assignment overrides."""
 from __future__ import print_function
 
 import os
 import sys
+import tempfile
+from collections import OrderedDict
 
 
 def _bootstrap_script_dir():
@@ -28,6 +30,264 @@ with open(_CORE_PATH, "rb") as _core_handle:
     _core_code = compile(_core_handle.read(), _CORE_PATH, "exec")
 eval(_core_code, globals(), globals())
 globals()["__name__"] = _ENTRY_NAME
+
+
+# Assignment ownership is repository state, not coordinator-machine state.  Keep the
+# existing core's in-memory registry shape so the UI/lease code stays unchanged, but
+# reconstruct and persist durable ownership through each open SceneIssue's issue.json.
+REPO_PATH = os.path.abspath(os.environ.get("VOXEL_REPO_PATH", REPO_PATH))
+SCENE_ISSUES_PATH = os.path.join(REPO_PATH, "SceneIssues")
+OPEN_SCENE_ISSUES_PATH = os.path.join(SCENE_ISSUES_PATH, "open")
+PENDING_SCENE_ISSUES_PATH = os.path.join(SCENE_ISSUES_PATH, "pending")
+REGISTRY_PATH = "SceneIssue issue.json on origin/master"
+ASSIGNMENT_FIELD = "assignment"
+ASSIGNMENT_COMMIT_MESSAGE = "chore(scene-issues): persist coordinator assignment"
+MASTER_UPDATE_RETRIES = 4
+
+
+def run_git(arguments, check=True, input_text=None, extra_env=None):
+    command = ["git", "-C", REPO_PATH] + list(arguments)
+    environment = None
+    if extra_env:
+        environment = os.environ.copy()
+        environment.update(extra_env)
+    stdin = subprocess.PIPE if input_text is not None else None
+    process = subprocess.Popen(
+        command, stdin=stdin, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment)
+    payload = None
+    if input_text is not None:
+        payload = input_text if isinstance(input_text, bytes) else input_text.encode("utf-8")
+    stdout, stderr = process.communicate(payload)
+    stdout = _decode(stdout)
+    stderr = _decode(stderr)
+    if check and process.returncode != 0:
+        raise RuntimeError("git command failed (%s): %s" % (
+            " ".join(arguments), stderr.strip() or "exit %d" % process.returncode))
+    return process.returncode, stdout, stderr
+
+
+def read_json_at_ref(ref_name, repo_relative_path):
+    code, stdout, unused_stderr = run_git(
+        ["show", "%s:%s" % (ref_name, repo_relative_path)], check=False)
+    if code != 0:
+        return None
+    try:
+        value = json.loads(stdout, object_pairs_hook=OrderedDict)
+    except ValueError:
+        return None
+    return value if hasattr(value, "get") else None
+
+
+def assignment_issue_path(task_id, ref_name=None):
+    """Return the issue.json path currently authoritative for an open assignment."""
+    ref_name = ref_name or QUEUE_REF
+    if task_id not in list_open_tasks(ref_name):
+        return None
+    return "SceneIssues/open/%s/issue.json" % task_id
+
+
+def _issue_assignment(issue):
+    value = (issue or {}).get(ASSIGNMENT_FIELD)
+    if not hasattr(value, "get") or not value.get("owner"):
+        return None
+    return OrderedDict(value)
+
+
+def _persistent_assignment(info):
+    """Return only durable ownership data; UI heartbeat/nudge state stays in memory."""
+    if not info or info.get("status") != "in_progress":
+        return None
+    result = OrderedDict()
+    for key in ("owner", "branch", "ci_branch", "claimed_at", "lease_history"):
+        if key in info:
+            result[key] = info[key]
+    return result
+
+
+def _runtime_assignment(persisted, now=None):
+    """Restore durable assignment state and start a fresh local UI lease."""
+    if not persisted:
+        return None
+    now = time.time() if now is None else now
+    result = dict(persisted)
+    result["status"] = "in_progress"
+    result["last_heartbeat"] = now
+    result["last_prompted"] = 0
+    result["prompt_count"] = 0
+    result["prompt_confirmed"] = False
+    return result
+
+
+def load_registry(ref_name=None, now=None):
+    """Load assignment ownership exclusively from SceneIssue issue.json files."""
+    ref_name = ref_name or QUEUE_REF
+    now = time.time() if now is None else now
+    tasks = {}
+    persisted = {}
+    for task_id in list_open_tasks(ref_name):
+        path = assignment_issue_path(task_id, ref_name)
+        issue = read_json_at_ref(ref_name, path) if path else None
+        assignment = _issue_assignment(issue)
+        if not assignment:
+            continue
+        persisted[task_id] = assignment
+        runtime = _runtime_assignment(assignment, now=now)
+        runtime["work_kind"] = scene_work_kind(task_id, ref_name)
+        tasks[task_id] = runtime
+    return {
+        "version": 2,
+        "tasks": tasks,
+        "_persisted_assignments": persisted,
+    }
+
+
+def _replace_registry_from_remote(registry, now=None):
+    """Refresh ownership from master while preserving this process's ephemeral UI state."""
+    now = time.time() if now is None else now
+    remote = load_registry(now=now)
+    ephemeral_top = dict(
+        (key, value) for key, value in registry.items()
+        if key not in ("version", "tasks", "_persisted_assignments"))
+    durable_keys = set(("owner", "branch", "ci_branch", "claimed_at", "lease_history", "status"))
+    for task_id, remote_info in remote["tasks"].items():
+        local_info = registry.get("tasks", {}).get(task_id)
+        if local_info and local_info.get("owner") == remote_info.get("owner"):
+            for key, value in local_info.items():
+                if key not in durable_keys:
+                    remote_info[key] = value
+            remote_info["last_heartbeat"] = max(
+                float(local_info.get("last_heartbeat") or 0),
+                float(remote_info.get("last_heartbeat") or 0))
+    registry.clear()
+    registry.update(remote)
+    registry.update(ephemeral_top)
+    return registry
+
+
+def _adopt_remote_assignment(registry, task_id, remote_assignment):
+    persisted = registry.setdefault("_persisted_assignments", {})
+    if remote_assignment:
+        persisted[task_id] = OrderedDict(remote_assignment)
+        runtime = _runtime_assignment(remote_assignment)
+        runtime["work_kind"] = scene_work_kind(task_id)
+        registry.setdefault("tasks", {})[task_id] = runtime
+    else:
+        persisted.pop(task_id, None)
+        registry.setdefault("tasks", {}).pop(task_id, None)
+
+
+def _create_assignment_commit(base_sha, updates):
+    """Create a master child commit without checking out or modifying the voxel worktree."""
+    descriptor, index_path = tempfile.mkstemp(prefix="auto-assignment-index-")
+    os.close(descriptor)
+    try:
+        os.remove(index_path)
+    except OSError:
+        pass
+    env = {"GIT_INDEX_FILE": index_path}
+    identity = {
+        "GIT_AUTHOR_NAME": "SceneIssue Coordinator",
+        "GIT_AUTHOR_EMAIL": "scene-issue-coordinator@local",
+        "GIT_COMMITTER_NAME": "SceneIssue Coordinator",
+        "GIT_COMMITTER_EMAIL": "scene-issue-coordinator@local",
+    }
+    try:
+        run_git(["read-tree", base_sha], extra_env=env)
+        for path in sorted(updates):
+            unused_code, blob_sha, unused_stderr = run_git(
+                ["hash-object", "-w", "--stdin"], input_text=updates[path])
+            run_git([
+                "update-index", "--add", "--cacheinfo", "100644",
+                blob_sha.strip(), path,
+            ], extra_env=env)
+        unused_code, tree_sha, unused_stderr = run_git(["write-tree"], extra_env=env)
+        commit_env = dict(identity)
+        unused_code, commit_sha, unused_stderr = run_git([
+            "commit-tree", tree_sha.strip(), "-p", base_sha, "-m", ASSIGNMENT_COMMIT_MESSAGE,
+        ], extra_env=commit_env)
+        return commit_sha.strip()
+    finally:
+        try:
+            os.remove(index_path)
+        except OSError:
+            pass
+
+
+def save_registry(registry):
+    """Persist changed durable assignment ownership into open issue manifests on master."""
+    persisted = registry.setdefault("_persisted_assignments", {})
+    dirty = []
+    for task_id, info in registry.get("tasks", {}).items():
+        if _persistent_assignment(info) != persisted.get(task_id):
+            dirty.append(task_id)
+    if not dirty:
+        return False
+
+    for unused_attempt in range(MASTER_UPDATE_RETRIES):
+        fetch_remote()
+        unused_code, base_sha, unused_stderr = run_git(["rev-parse", QUEUE_REF])
+        base_sha = base_sha.strip()
+        updates = OrderedDict()
+        accepted = []
+
+        for task_id in list(dirty):
+            path = assignment_issue_path(task_id, QUEUE_REF)
+            if not path:
+                _adopt_remote_assignment(registry, task_id, None)
+                continue
+            issue = read_json_at_ref(QUEUE_REF, path)
+            if issue is None:
+                raise RuntimeError("cannot read assignment issue: %s" % path)
+            remote_assignment = _issue_assignment(issue)
+            baseline = persisted.get(task_id)
+            local_assignment = _persistent_assignment(registry["tasks"].get(task_id))
+
+            if remote_assignment != baseline:
+                log("assignment for %s changed on master; adopting remote owner %s" % (
+                    task_id, (remote_assignment or {}).get("owner") or "<unassigned>"))
+                _adopt_remote_assignment(registry, task_id, remote_assignment)
+                continue
+
+            if local_assignment is None:
+                issue.pop(ASSIGNMENT_FIELD, None)
+            else:
+                issue[ASSIGNMENT_FIELD] = local_assignment
+            updates[path] = json.dumps(issue, indent=2) + "\n"
+            accepted.append(task_id)
+
+        if not updates:
+            return False
+
+        commit_sha = _create_assignment_commit(base_sha, updates)
+        code, unused_stdout, stderr = run_git([
+            "push", REMOTE, "%s:refs/heads/master" % commit_sha,
+        ], check=False)
+        if code == 0:
+            run_git(["update-ref", "refs/remotes/%s/master" % REMOTE, commit_sha])
+            for task_id in accepted:
+                local_assignment = _persistent_assignment(registry["tasks"].get(task_id))
+                if local_assignment:
+                    persisted[task_id] = local_assignment
+                else:
+                    persisted.pop(task_id, None)
+            return True
+
+        message = stderr.strip().lower()
+        if "non-fast-forward" in message or "fetch first" in message or "failed to push" in message:
+            log("master advanced while persisting assignments; retrying from latest origin/master")
+            continue
+        raise RuntimeError("failed to persist assignment state: %s" % (
+            stderr.strip() or "git push failed"))
+
+    raise RuntimeError("master kept advancing while persisting assignment state")
+
+
+def sync_remote_and_registry(registry):
+    fetch_remote()
+    _replace_registry_from_remote(registry)
+    refresh_ci_activity(registry)
+    reconcile_assignments(registry)
+    return list_open_tasks()
 
 
 def task_prompt(number, task_id, work_kind=None):
