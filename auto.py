@@ -32,14 +32,18 @@ eval(_core_code, globals(), globals())
 globals()["__name__"] = _ENTRY_NAME
 
 
-# Assignment ownership is repository state, not coordinator-machine state.  Keep the
+# Assignment ownership is repository state, not coordinator-machine state. Keep the
 # existing core's in-memory registry shape so the UI/lease code stays unchanged, but
-# reconstruct and persist durable ownership through each open SceneIssue's issue.json.
+# reconstruct and persist durable ownership through each open SceneIssue's issue.json
+# on an unprotected coordination branch. Queue/open/closed truth remains on master.
 REPO_PATH = os.path.abspath(os.environ.get("VOXEL_REPO_PATH", REPO_PATH))
 SCENE_ISSUES_PATH = os.path.join(REPO_PATH, "SceneIssues")
 OPEN_SCENE_ISSUES_PATH = os.path.join(SCENE_ISSUES_PATH, "open")
 PENDING_SCENE_ISSUES_PATH = os.path.join(SCENE_ISSUES_PATH, "pending")
-REGISTRY_PATH = "SceneIssue issue.json on origin/master"
+ASSIGNMENT_BRANCH = os.environ.get("VOXEL_ASSIGNMENT_BRANCH", "automation/assignments")
+ASSIGNMENT_REF = "refs/remotes/%s/%s" % (REMOTE, ASSIGNMENT_BRANCH)
+ASSIGNMENT_REMOTE_REF = "refs/heads/%s" % ASSIGNMENT_BRANCH
+REGISTRY_PATH = "SceneIssue issue.json on origin/%s" % ASSIGNMENT_BRANCH
 ASSIGNMENT_FIELD = "assignment"
 ASSIGNMENT_COMMIT_MESSAGE = "chore(scene-issues): persist coordinator assignment"
 MASTER_UPDATE_RETRIES = 4
@@ -78,10 +82,31 @@ def read_json_at_ref(ref_name, repo_relative_path):
     return value if hasattr(value, "get") else None
 
 
+def ensure_assignment_ref():
+    """Create the durable coordination branch from current master if it does not exist."""
+    if ref_exists(ASSIGNMENT_REF):
+        return
+    fetch_remote()
+    if ref_exists(ASSIGNMENT_REF):
+        return
+    unused_code, master_sha, unused_stderr = run_git(["rev-parse", QUEUE_REF])
+    master_sha = master_sha.strip()
+    code, unused_stdout, stderr = run_git([
+        "push", REMOTE, "%s:%s" % (master_sha, ASSIGNMENT_REMOTE_REF),
+    ], check=False)
+    if code == 0:
+        run_git(["update-ref", ASSIGNMENT_REF, master_sha])
+        return
+    fetch_remote()
+    if ref_exists(ASSIGNMENT_REF):
+        return
+    raise RuntimeError("could not create assignment branch %s: %s" % (
+        ASSIGNMENT_BRANCH, stderr.strip() or "git push failed"))
+
+
 def assignment_issue_path(task_id, ref_name=None):
-    """Return the issue.json path currently authoritative for an open assignment."""
-    ref_name = ref_name or QUEUE_REF
-    if task_id not in list_open_tasks(ref_name):
+    """Return the issue.json path currently authoritative as open on master."""
+    if task_id not in list_open_tasks(QUEUE_REF):
         return None
     return "SceneIssues/open/%s/issue.json" % task_id
 
@@ -120,19 +145,21 @@ def _runtime_assignment(persisted, now=None):
 
 def load_registry(ref_name=None, now=None):
     """Load assignment ownership exclusively from SceneIssue issue.json files."""
-    ref_name = ref_name or QUEUE_REF
+    ref_name = ref_name or ASSIGNMENT_REF
     now = time.time() if now is None else now
     tasks = {}
     persisted = {}
-    for task_id in list_open_tasks(ref_name):
-        path = assignment_issue_path(task_id, ref_name)
-        issue = read_json_at_ref(ref_name, path) if path else None
+    if not ref_exists(ref_name):
+        return {"version": 2, "tasks": tasks, "_persisted_assignments": persisted}
+    for task_id in list_open_tasks(QUEUE_REF):
+        path = "SceneIssues/open/%s/issue.json" % task_id
+        issue = read_json_at_ref(ref_name, path)
         assignment = _issue_assignment(issue)
         if not assignment:
             continue
         persisted[task_id] = assignment
         runtime = _runtime_assignment(assignment, now=now)
-        runtime["work_kind"] = scene_work_kind(task_id, ref_name)
+        runtime["work_kind"] = scene_work_kind(task_id, QUEUE_REF)
         tasks[task_id] = runtime
     return {
         "version": 2,
@@ -142,7 +169,7 @@ def load_registry(ref_name=None, now=None):
 
 
 def _replace_registry_from_remote(registry, now=None):
-    """Refresh ownership from master while preserving this process's ephemeral UI state."""
+    """Refresh ownership from the coordination branch while preserving ephemeral UI state."""
     now = time.time() if now is None else now
     remote = load_registry(now=now)
     ephemeral_top = dict(
@@ -169,22 +196,22 @@ def _adopt_remote_assignment(registry, task_id, remote_assignment):
     if remote_assignment:
         persisted[task_id] = OrderedDict(remote_assignment)
         runtime = _runtime_assignment(remote_assignment)
-        runtime["work_kind"] = scene_work_kind(task_id)
+        runtime["work_kind"] = scene_work_kind(task_id, QUEUE_REF)
         registry.setdefault("tasks", {})[task_id] = runtime
     else:
         persisted.pop(task_id, None)
         registry.setdefault("tasks", {}).pop(task_id, None)
 
 
-def _create_assignment_commit(base_sha, updates):
-    """Create a master child commit without checking out or modifying the voxel worktree."""
+def _create_assignment_commit(master_sha, parent_sha, updates):
+    """Create a coordination-branch commit from the latest master tree without checkout."""
     descriptor, index_path = tempfile.mkstemp(prefix="auto-assignment-index-")
     os.close(descriptor)
     try:
         os.remove(index_path)
     except OSError:
         pass
-    env = {"GIT_INDEX_FILE": index_path}
+    index_env = {"GIT_INDEX_FILE": index_path}
     identity = {
         "GIT_AUTHOR_NAME": "SceneIssue Coordinator",
         "GIT_AUTHOR_EMAIL": "scene-issue-coordinator@local",
@@ -192,19 +219,18 @@ def _create_assignment_commit(base_sha, updates):
         "GIT_COMMITTER_EMAIL": "scene-issue-coordinator@local",
     }
     try:
-        run_git(["read-tree", base_sha], extra_env=env)
+        run_git(["read-tree", master_sha], extra_env=index_env)
         for path in sorted(updates):
             unused_code, blob_sha, unused_stderr = run_git(
                 ["hash-object", "-w", "--stdin"], input_text=updates[path])
             run_git([
                 "update-index", "--add", "--cacheinfo", "100644",
                 blob_sha.strip(), path,
-            ], extra_env=env)
-        unused_code, tree_sha, unused_stderr = run_git(["write-tree"], extra_env=env)
-        commit_env = dict(identity)
+            ], extra_env=index_env)
+        unused_code, tree_sha, unused_stderr = run_git(["write-tree"], extra_env=index_env)
         unused_code, commit_sha, unused_stderr = run_git([
-            "commit-tree", tree_sha.strip(), "-p", base_sha, "-m", ASSIGNMENT_COMMIT_MESSAGE,
-        ], extra_env=commit_env)
+            "commit-tree", tree_sha.strip(), "-p", parent_sha, "-m", ASSIGNMENT_COMMIT_MESSAGE,
+        ], extra_env=identity)
         return commit_sha.strip()
     finally:
         try:
@@ -214,7 +240,7 @@ def _create_assignment_commit(base_sha, updates):
 
 
 def save_registry(registry):
-    """Persist changed durable assignment ownership into open issue manifests on master."""
+    """Persist changed durable ownership into issue manifests on the coordination branch."""
     persisted = registry.setdefault("_persisted_assignments", {})
     dirty = []
     for task_id, info in registry.get("tasks", {}).items():
@@ -225,65 +251,67 @@ def save_registry(registry):
 
     for unused_attempt in range(MASTER_UPDATE_RETRIES):
         fetch_remote()
-        unused_code, base_sha, unused_stderr = run_git(["rev-parse", QUEUE_REF])
-        base_sha = base_sha.strip()
-        updates = OrderedDict()
+        ensure_assignment_ref()
+        unused_code, parent_sha, unused_stderr = run_git(["rev-parse", ASSIGNMENT_REF])
+        unused_code, master_sha, unused_stderr = run_git(["rev-parse", QUEUE_REF])
+        parent_sha = parent_sha.strip()
+        master_sha = master_sha.strip()
+        remote_registry = load_registry(ref_name=ASSIGNMENT_REF)
+        remote_persisted = OrderedDict(remote_registry.get("_persisted_assignments") or {})
         accepted = []
 
         for task_id in list(dirty):
-            path = assignment_issue_path(task_id, QUEUE_REF)
+            baseline = persisted.get(task_id)
+            remote_assignment = remote_persisted.get(task_id)
+            if remote_assignment != baseline:
+                log("assignment for %s changed on %s; adopting remote owner %s" % (
+                    task_id, ASSIGNMENT_BRANCH,
+                    (remote_assignment or {}).get("owner") or "<unassigned>"))
+                _adopt_remote_assignment(registry, task_id, remote_assignment)
+                continue
+            local_assignment = _persistent_assignment(registry.get("tasks", {}).get(task_id))
+            if local_assignment:
+                remote_persisted[task_id] = local_assignment
+            else:
+                remote_persisted.pop(task_id, None)
+            accepted.append(task_id)
+
+        if not accepted:
+            return False
+
+        updates = OrderedDict()
+        for task_id, assignment in remote_persisted.items():
+            path = assignment_issue_path(task_id)
             if not path:
-                _adopt_remote_assignment(registry, task_id, None)
                 continue
             issue = read_json_at_ref(QUEUE_REF, path)
             if issue is None:
-                raise RuntimeError("cannot read assignment issue: %s" % path)
-            remote_assignment = _issue_assignment(issue)
-            baseline = persisted.get(task_id)
-            local_assignment = _persistent_assignment(registry["tasks"].get(task_id))
-
-            if remote_assignment != baseline:
-                log("assignment for %s changed on master; adopting remote owner %s" % (
-                    task_id, (remote_assignment or {}).get("owner") or "<unassigned>"))
-                _adopt_remote_assignment(registry, task_id, remote_assignment)
-                continue
-
-            if local_assignment is None:
-                issue.pop(ASSIGNMENT_FIELD, None)
-            else:
-                issue[ASSIGNMENT_FIELD] = local_assignment
+                raise RuntimeError("cannot read assignment issue from master: %s" % path)
+            issue[ASSIGNMENT_FIELD] = assignment
             updates[path] = json.dumps(issue, indent=2) + "\n"
-            accepted.append(task_id)
 
-        if not updates:
-            return False
-
-        commit_sha = _create_assignment_commit(base_sha, updates)
+        commit_sha = _create_assignment_commit(master_sha, parent_sha, updates)
         code, unused_stdout, stderr = run_git([
-            "push", REMOTE, "%s:refs/heads/master" % commit_sha,
+            "push", REMOTE, "%s:%s" % (commit_sha, ASSIGNMENT_REMOTE_REF),
         ], check=False)
         if code == 0:
-            run_git(["update-ref", "refs/remotes/%s/master" % REMOTE, commit_sha])
-            for task_id in accepted:
-                local_assignment = _persistent_assignment(registry["tasks"].get(task_id))
-                if local_assignment:
-                    persisted[task_id] = local_assignment
-                else:
-                    persisted.pop(task_id, None)
+            run_git(["update-ref", ASSIGNMENT_REF, commit_sha])
+            registry["_persisted_assignments"] = OrderedDict(remote_persisted)
             return True
 
         message = stderr.strip().lower()
         if "non-fast-forward" in message or "fetch first" in message or "failed to push" in message:
-            log("master advanced while persisting assignments; retrying from latest origin/master")
+            log("assignment branch advanced while persisting ownership; retrying")
             continue
         raise RuntimeError("failed to persist assignment state: %s" % (
             stderr.strip() or "git push failed"))
 
-    raise RuntimeError("master kept advancing while persisting assignment state")
+    raise RuntimeError("assignment branch kept advancing while persisting assignment state")
 
 
 def sync_remote_and_registry(registry):
     fetch_remote()
+    ensure_assignment_ref()
     _replace_registry_from_remote(registry)
     refresh_ci_activity(registry)
     reconcile_assignments(registry)
