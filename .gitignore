@@ -1,4 +1,5 @@
 _diagnostics/
+_registry.json
 .DS_Store
 __pycache__/
 *.py[cod]
