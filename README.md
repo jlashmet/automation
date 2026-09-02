@@ -24,7 +24,7 @@ issue's `issue.json` on the voxel repository's `automation/assignments` coordina
 ```sh
 cd /Users/jlashmet/automation
 java -jar oculixide-4.0.0-macos.jar -c -r auto.py -- --check
-python3 -m unittest -v test_auto.py
+python3 -m unittest -v test_auto.py test_assignment_persistence.py
 ```
 
 ## Run
