@@ -3,7 +3,7 @@
 `auto.py` drives up to nine Oculix/Sikuli browser tabs while using GitHub as the source of truth
 for the `SceneIssues/open/` queue, verified captures under `SceneIssues/pending/`, completed
 captures under `SceneIssues/closed/`, and active agent assignment ownership stored in each open
-issue's `issue.json`.
+issue's `issue.json` on the voxel repository's `automation/assignments` coordination branch.
 
 ## Before starting
 
@@ -14,10 +14,10 @@ issue's `issue.json`.
 2. Ensure Java/Oculix has macOS Accessibility and Screen Recording permission.
 3. Ensure the voxel repository exists, `origin` is configured, and `gh auth status` succeeds.
    The historical default is `/Users/jlashmet/code/voxel`; set `VOXEL_REPO_PATH` when the clone is
-   elsewhere on another computer.
+   elsewhere on another computer. `VOXEL_ASSIGNMENT_BRANCH` may override the default
+   `automation/assignments` coordination branch when needed.
 4. Run the repository-root `./push_scene_issues.sh` from an up-to-date local `master` to publish
-   newly captured issues. The coordinator intentionally reads `SceneIssues/open/` from the remote
-   branch, not from uncommitted local files.
+   newly captured issues. Queue state is read from `origin/master`, not from uncommitted local files.
 
 ## Validate without driving the browser
 
@@ -36,10 +36,18 @@ java -jar oculixide-4.0.0-macos.jar -c -r auto.py
 
 Stop it with `Ctrl+C`. Durable assignment state is not stored beside the automation script. The
 coordinator writes an `assignment` object into the authoritative open SceneIssue `issue.json` on
-`origin/master` before prompting a newly claimed worker. On startup it fetches the voxel repo and
-reconstructs ownership from those manifests, so the coordinator can be stopped on one computer and
-started from another clone without copying a registry file. UI heartbeat, prompt-backoff, and tab
-activity remain process-local runtime state. Do not intentionally run two coordinators at once.
+`origin/automation/assignments` before prompting a newly claimed worker. On startup it fetches the
+voxel repo and reconstructs ownership from those manifests, so the coordinator can be stopped on
+one computer and started from another clone without copying a registry file. UI heartbeat,
+prompt-backoff, and tab activity remain process-local runtime state. Do not intentionally run two
+coordinators at once.
+
+The coordination branch exists because voxel `master` is protected and requires pull-request CI.
+Assignment claims must not wait for or generate a protected-master PR. Queue status still comes only
+from `origin/master`; the coordination branch is a durable overlay containing the same SceneIssue
+manifests plus assignment metadata. Every assignment commit rebuilds its tree from current master,
+then reapplies active assignments, so normal feature/queue content does not become independently
+owned by the coordination branch.
 
 Each browser slot reuses its own feature and CI branches:
 
@@ -52,16 +60,14 @@ fixes/agent-2              ci-test/fixes/agent-2
 The oldest unclaimed capture under `origin/master:SceneIssues/open/` is assigned first. A visible
 running-response control or input box renews the task's in-memory UI lease. A task whose tab has not
 been observable for one hour in the running coordinator may be reassigned only when the former
-owner's feature branch has no work outside `origin/master`. Otherwise the coordinator records that
-an explicit handoff is required in memory and leaves ownership in place so unfinished work is not
-silently stacked beneath another assignment. Assignment claims themselves are durable in the issue
-manifest and survive coordinator restarts.
+owner's feature branch has no work outside `origin/master`. Otherwise the coordinator leaves
+ownership in place so unfinished work is not silently stacked beneath another assignment.
+Assignment claims themselves are durable in the issue manifest and survive coordinator restarts.
 
 Assignment writes do not check out or modify the local voxel worktree. The coordinator constructs a
-child commit from the current remote master with a temporary Git index and pushes it non-force. If
-master advances or another coordinator changed the same issue assignment after the local snapshot,
-the write is retried or the newer remote assignment wins rather than double-claiming the issue.
-Heartbeat and UI-only changes do not create master commits.
+new `automation/assignments` commit with a temporary Git index and pushes it non-force. If another
+coordinator changed the same issue assignment after the local snapshot, the newer remote assignment
+wins rather than double-claiming the issue. Heartbeat and UI-only changes do not create Git commits.
 
 After selecting a tab, the coordinator scrolls to the bottom. If the conversation-length screen is
 visible, it clicks **Start new chat**, resets that task's prompt backoff, and sends either the full
@@ -105,7 +111,7 @@ For a completed issue, the coordinator waits until all of these are visible afte
 - after targeted CI succeeds, the same worker moves the capture from `pending/` to `closed/`, sets
   `status: fixed` and `resolvedUtc`, and commits that bookkeeping on its feature branch;
 - the worker merges current `origin/master` into its feature branch and pushes the exact feature
-  head to `origin/master` non-force; and
+  head to `origin/master` through the repository's accepted promotion path; and
 - master contains the fix and capture only under `SceneIssues/closed/`.
 
 CI request branches are updated atomically: construct the final request commit directly on the
@@ -113,11 +119,6 @@ feature SHA being tested, then force-update the assigned CI ref once. Do not pub
 intermediate reset/template head because that is another push event and can later cancel the real
 request when GitHub admits events out of order.
 
-Workers promote their own completed issues. If another worker advances master first, the worker
-fetches and merges the new master into its feature branch, then retries the non-force master push.
 The coordinator releases the tab and assigns another capture after it observes the fixed capture
 under `SceneIssues/closed/` on master. A blocked capture remains in `open/`; it is not complete.
-
-The `assignment` object is coordinator metadata attached to an open issue. Workers should preserve
-it when merging current master; if it travels with the issue into `closed/`, it is historical only
-and is ignored by the coordinator because folder location remains authoritative for queue state.
+Closed/pending master state always overrides stale assignment metadata on the coordination branch.
