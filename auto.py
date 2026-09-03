@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Coordinator entrypoint. Workflow policy lives in the voxel repository."""
 from __future__ import print_function
 
@@ -102,7 +103,7 @@ def continuation_prompt(number, task_id, info=None):
     if state in ("close_and_merge", "merge_to_master"):
         feature_check = (
             "First confirm every `tasks.md` checkbox and acceptance criterion; the old phrase "
-            "`keep the feature open or pending` is obsolete—keep it open until complete. "
+            "`keep the feature open or pending` is obsolete - keep it open until complete. "
             if work_kind == FEATURE_WORK_KIND else "")
         return (
             "%s is verified. %sDo not use `%s`; close to `%s` if needed. Follow "
