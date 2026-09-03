@@ -9,21 +9,23 @@ import traceback
 
 def _script_dir():
     """Locate sibling coordinator modules under CPython and Oculix/Jython."""
+    configured = os.environ.get("AUTOMATION_DIR")
+    if configured:
+        return os.path.abspath(configured)
     file_name = globals().get("__file__")
     if file_name:
         return os.path.dirname(os.path.abspath(file_name))
+    # Prefer the launched script path over Oculix's bundle path. The bundle path may
+    # point at a shared volume even when run.sh and the image assets are local.
+    if sys.argv and sys.argv[0]:
+        candidate = os.path.abspath(str(sys.argv[0]))
+        if os.path.isfile(candidate):
+            return os.path.dirname(candidate)
     get_bundle_path = globals().get("getBundlePath")
     if get_bundle_path:
         bundle_path = get_bundle_path()
         if bundle_path:
             return os.path.abspath(str(bundle_path))
-    # Oculix may execute a script without defining __file__. This fallback existed in
-    # the original single-file coordinator and is required when its cwd is not the
-    # automation checkout.
-    if sys.argv and sys.argv[0]:
-        candidate = os.path.abspath(str(sys.argv[0]))
-        if os.path.isfile(candidate):
-            return os.path.dirname(candidate)
     return os.getcwd()
 
 
@@ -42,16 +44,30 @@ def _fatal_startup(message):
             pass
 
 
+# Pin Sikuli/Oculix image lookup to the local automation checkout before loading the
+# runtime. This keeps textbox.png, submit.png, in_progress_glyph.png, etc. local even
+# when Oculix has a shared-volume bundle path configured.
+_LOCAL_SCRIPT_DIR = _script_dir()
+_set_bundle_path = globals().get("setBundlePath")
+if _set_bundle_path:
+    try:
+        _set_bundle_path(_LOCAL_SCRIPT_DIR)
+    except Exception:
+        pass
+
 # Keep coordinator/state implementation separate from prompt policy. The implementation
 # still loads auto_core.py and provides durable repository-backed assignment state.
 try:
-    _IMPL_PATH = os.path.join(_script_dir(), "auto_runtime.py")
+    _IMPL_PATH = os.path.join(_LOCAL_SCRIPT_DIR, "auto_runtime.py")
     _ENTRY_NAME = globals().get("__name__", "__main__")
     globals()["__name__"] = "scene_issue_auto_runtime"
     with open(_IMPL_PATH, "rb") as _impl_handle:
         _impl_code = compile(_impl_handle.read(), _IMPL_PATH, "exec")
     eval(_impl_code, globals(), globals())
     globals()["__name__"] = _ENTRY_NAME
+    # auto_core's image helpers join against SCRIPT_DIR. Override any bundle-derived
+    # value after bootstrap so all image reads stay in the local checkout.
+    SCRIPT_DIR = _LOCAL_SCRIPT_DIR
 except Exception as _startup_error:
     globals()["__name__"] = globals().get("_ENTRY_NAME", "__main__")
     _fatal_startup(_startup_error)
