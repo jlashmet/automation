@@ -29,41 +29,75 @@ globals()["__name__"] = _ENTRY_NAME
 
 
 def task_prompt(number, task_id, work_kind=None):
-    """Supply identity/state only; the voxel repo owns workflow instructions."""
+    """Supply assignment identity plus a short pointer to authoritative repo policy."""
     work_kind = work_kind or scene_work_kind(task_id)
+    guide = workflow_path(work_kind)
+    branch_name = feature_branch(number)
+    ci_branch_name = ci_branch(number)
+    open_path = "SceneIssues/open/%s" % task_id
+    closed_path = "SceneIssues/closed/%s" % task_id
+    legacy_pending = "SceneIssues/pending/%s" % task_id
+
+    if work_kind == FEATURE_WORK_KIND:
+        detail = (
+            "This is a feature assignment: keep separate `plan.md` and `tasks.md`; Add discovered "
+            "required work only as the repo guide permits, and complete every checkbox and acceptance "
+            "criterion before closure."
+        )
+    else:
+        detail = (
+            "For issue work, the repo guide owns competing hypotheses, behavioral regression, and "
+            "built-scene evidence."
+        )
+
     return (
-        "You are %s. Work only on `%s` on `%s`; `%s` is your targeted-CI transport. "
-        "Fetch origin, then read and follow `AGENTS.md`, `SceneIssues/README.md`, and `%s`; "
-        "those repo documents are authoritative. Do not self-select or modify another assignment."
-        % (agent_id(number), task_id, feature_branch(number), ci_branch(number),
-           workflow_path(work_kind)))
+        "You are %s. Work only on `%s` on `%s`; `%s` is your targeted-CI transport. Fetch origin, "
+        "then follow `AGENTS.md`, `SceneIssues/README.md`, and `%s`; those repo docs are authoritative. "
+        "%s Use exact-SHA CI as required. Close to `%s`; `%s` is legacy and must not be used. Do not "
+        "push that exact branch head to `origin/master`; final promotion is PR + auto-merge."
+        % (agent_id(number), open_path, branch_name, ci_branch_name, guide, detail,
+           closed_path, legacy_pending))
 
 
 def continuation_prompt(number, task_id, info=None):
+    work_kind = (info or {}).get("work_kind") or scene_work_kind(task_id)
+    guide = workflow_path(work_kind)
     gate = (info or {}).get("completion_gate") or {}
     state = gate.get("state")
     ci_branch_name = gate.get("ci_branch") or ci_branch(number)
     ci_head = gate.get("ci_head") or "<missing>"
+    open_path = "SceneIssues/open/%s" % task_id
+    closed_path = "SceneIssues/closed/%s" % task_id
+    legacy_pending = "SceneIssues/pending/%s" % task_id
 
     if state in ("close_and_merge", "merge_to_master"):
+        feature_check = (
+            "First confirm every `tasks.md` checkbox and acceptance criterion; the old phrase "
+            "`keep the feature open or pending` is obsolete—keep it open until complete. "
+            if work_kind == FEATURE_WORK_KIND else "")
         return (
-            "%s is verified. Follow `SceneIssues/README.md` completion: close it on `%s` if needed, "
-            "sync current master, push the branch, open/update its PR to `master`, enable auto-merge, "
-            "and monitor the required PR gate until it merges."
-            % (task_id, feature_branch(number)))
+            "%s is verified. %sDo not use `%s`; close to `%s` if needed. Follow "
+            "`SceneIssues/README.md`: sync `origin/master`, push `%s`, open/update its PR to master, "
+            "enable auto-merge, and monitor required PR checks until merged; do not wait for the "
+            "coordinator. Do not push its exact head to `origin/master`."
+            % (task_id, feature_check, legacy_pending, closed_path, feature_branch(number)))
     if state in ("queued", "in_progress", "waiting", "requested", "pending"):
         return "%s: `%s` at %s is %s. Monitor it without replacement." % (
             task_id, ci_branch_name, ci_head, state)
     if state in ("failure", "error", "cancelled", "timed_out", "action_required"):
         return (
-            "%s: `%s` at %s is %s. Follow the repo CI rules: inspect evidence, fix the cause or "
-            "retry only proven infrastructure failure on the same transport."
+            "%s: `%s` at %s reported `ci/single-test=%s`. Follow the repo CI rules: inspect evidence; "
+            "for infrastructure failure, retry only as allowed and update the assigned CI ref once; "
+            "for product failure, fix the cause."
             % (task_id, ci_branch_name, ci_head, state))
+
+    extra = (
+        " Keep `plan.md`/`tasks.md` current and do not close with any unchecked task."
+        if work_kind == FEATURE_WORK_KIND else "")
     return (
-        "Continue only `%s` on `%s`. Read `AGENTS.md`, `SceneIssues/README.md`, and `%s`, then work "
-        "the next non-blocked acceptance item."
-        % (task_id, feature_branch(number),
-           workflow_path((info or {}).get("work_kind") or scene_work_kind(task_id))))
+        "Continue only `%s` on `%s`. Follow `AGENTS.md`, `SceneIssues/README.md`, and `%s`; work the "
+        "next non-blocked acceptance item.%s"
+        % (open_path, feature_branch(number), guide, extra))
 
 
 def branch_cleanup_prompt(number, head=None):
