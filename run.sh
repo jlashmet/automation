@@ -2,6 +2,7 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+export AUTOMATION_DIR="$SCRIPT_DIR"
 
 # Oculix runs inside one JVM. Give the IDE/Jython coordinator enough headroom for
 # long-running browser automation instead of relying on the JVM's automatic heap sizing.
