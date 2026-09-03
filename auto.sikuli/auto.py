@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Oculix IDE bundle entrypoint for the automation coordinator."""
+"""Oculix bundle entrypoint for the automation coordinator."""
 from __future__ import print_function
 
 import os
+import sys
 
 
 def _bundle_dir():
@@ -25,7 +26,22 @@ _set_bundle_path = globals().get("setBundlePath")
 if _set_bundle_path:
     _set_bundle_path(_AUTOMATION_DIR)
 
+# Load the root coordinator as a module rather than relying on the runner's __name__.
+# Oculix's -r path does not consistently execute bundles with __name__ == '__main__',
+# which can otherwise make auto.py load successfully and then exit immediately.
 _MAIN = os.path.join(_AUTOMATION_DIR, "auto.py")
-with open(_MAIN, "rb") as _main_handle:
-    _main_code = compile(_main_handle.read(), _MAIN, "exec")
-eval(_main_code, globals(), globals())
+_ENTRY_NAME = globals().get("__name__", "__main__")
+globals()["__name__"] = "automation_bundle_entry"
+try:
+    with open(_MAIN, "rb") as _main_handle:
+        _main_code = compile(_main_handle.read(), _MAIN, "exec")
+    eval(_main_code, globals(), globals())
+finally:
+    globals()["__name__"] = _ENTRY_NAME
+
+# The bundle is the executable entrypoint, so start the coordinator explicitly.
+# Keep --check usable from run.sh as well.
+if "--check" in sys.argv:
+    check_only()
+else:
+    coordinator_loop()
