@@ -11,8 +11,10 @@ export AUTOMATION_DIR="$SCRIPT_DIR"
 OCULIX_MIN_HEAP=${OCULIX_MIN_HEAP:-1g}
 OCULIX_MAX_HEAP=${OCULIX_MAX_HEAP:-8g}
 
+# Run the Oculix-native .sikuli bundle. Plain .py IDE support is still incomplete in
+# Oculix and can fail before an active editor content object exists.
 exec java \
     "-Xms${OCULIX_MIN_HEAP}" \
     "-Xmx${OCULIX_MAX_HEAP}" \
     -jar "$SCRIPT_DIR/oculixide-4.0.0-macos.jar" \
-    -c -r "$SCRIPT_DIR/auto.py" "$@"
+    -c -r "$SCRIPT_DIR/auto.sikuli" "$@"
