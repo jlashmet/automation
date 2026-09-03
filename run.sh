@@ -11,10 +11,11 @@ export AUTOMATION_DIR="$SCRIPT_DIR"
 OCULIX_MIN_HEAP=${OCULIX_MIN_HEAP:-1g}
 OCULIX_MAX_HEAP=${OCULIX_MAX_HEAP:-8g}
 
-# Run the Oculix-native .sikuli bundle. Plain .py IDE support is still incomplete in
-# Oculix and can fail before an active editor content object exists.
+# Oculix 4's supported IDE auto-run path is preload + execute (-l/-e). This mirrors
+# opening auto.sikuli in the IDE and pressing Run, which avoids the separate -r runner
+# path that behaves differently from the working IDE flow.
 exec java \
     "-Xms${OCULIX_MIN_HEAP}" \
     "-Xmx${OCULIX_MAX_HEAP}" \
     -jar "$SCRIPT_DIR/oculixide-4.0.0-macos.jar" \
-    -c -r "$SCRIPT_DIR/auto.sikuli" "$@"
+    -l "$SCRIPT_DIR/auto.sikuli" -e "$@"
