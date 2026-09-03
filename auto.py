@@ -3,9 +3,11 @@ from __future__ import print_function
 
 import os
 import sys
+import traceback
 
 
 def _script_dir():
+    """Locate sibling coordinator modules under CPython and Oculix/Jython."""
     file_name = globals().get("__file__")
     if file_name:
         return os.path.dirname(os.path.abspath(file_name))
@@ -14,18 +16,45 @@ def _script_dir():
         bundle_path = get_bundle_path()
         if bundle_path:
             return os.path.abspath(str(bundle_path))
+    # Oculix may execute a script without defining __file__. This fallback existed in
+    # the original single-file coordinator and is required when its cwd is not the
+    # automation checkout.
+    if sys.argv and sys.argv[0]:
+        candidate = os.path.abspath(str(sys.argv[0]))
+        if os.path.isfile(candidate):
+            return os.path.dirname(candidate)
     return os.getcwd()
+
+
+def _fatal_startup(message):
+    text = "Automation startup failed: %s" % message
+    try:
+        sys.stderr.write(text + "\n")
+        traceback.print_exc()
+    except Exception:
+        pass
+    popup = globals().get("popup")
+    if popup:
+        try:
+            popup(text)
+        except Exception:
+            pass
 
 
 # Keep coordinator/state implementation separate from prompt policy. The implementation
 # still loads auto_core.py and provides durable repository-backed assignment state.
-_IMPL_PATH = os.path.join(_script_dir(), "auto_runtime.py")
-_ENTRY_NAME = globals().get("__name__", "__main__")
-globals()["__name__"] = "scene_issue_auto_runtime"
-with open(_IMPL_PATH, "rb") as _impl_handle:
-    _impl_code = compile(_impl_handle.read(), _IMPL_PATH, "exec")
-eval(_impl_code, globals(), globals())
-globals()["__name__"] = _ENTRY_NAME
+try:
+    _IMPL_PATH = os.path.join(_script_dir(), "auto_runtime.py")
+    _ENTRY_NAME = globals().get("__name__", "__main__")
+    globals()["__name__"] = "scene_issue_auto_runtime"
+    with open(_IMPL_PATH, "rb") as _impl_handle:
+        _impl_code = compile(_impl_handle.read(), _IMPL_PATH, "exec")
+    eval(_impl_code, globals(), globals())
+    globals()["__name__"] = _ENTRY_NAME
+except Exception as _startup_error:
+    globals()["__name__"] = globals().get("_ENTRY_NAME", "__main__")
+    _fatal_startup(_startup_error)
+    raise
 
 
 def task_prompt(number, task_id, work_kind=None):
@@ -40,7 +69,7 @@ def task_prompt(number, task_id, work_kind=None):
 
     if work_kind == FEATURE_WORK_KIND:
         detail = (
-            "This is a feature assignment: keep separate `plan.md` and `tasks.md`; Add discovered "
+            "This is a feature assignment: keep separate `plan.md` and `tasks.md`; add discovered "
             "required work only as the repo guide permits, and complete every checkbox and acceptance "
             "criterion before closure."
         )
@@ -110,7 +139,11 @@ def branch_cleanup_prompt(number, head=None):
 
 
 if globals().get("__name__") == "__main__":
-    if "--check" in sys.argv:
-        check_only()
-    else:
-        coordinator_loop()
+    try:
+        if "--check" in sys.argv:
+            check_only()
+        else:
+            coordinator_loop()
+    except Exception as _run_error:
+        _fatal_startup(_run_error)
+        raise
