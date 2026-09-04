@@ -61,6 +61,16 @@ class PromptPolicyTests(unittest.TestCase):
         self.assertIn("next unchecked", prompt)
         self.assertIn("external prerequisite", prompt)
 
+    def test_unconfirmed_assignment_retries_even_while_ci_is_active(self):
+        info = {
+            "last_prompted": 0,
+            "prompt_count": 0,
+            "prompt_confirmed": False,
+            "ci_activity": {"state": "in_progress"},
+        }
+
+        self.assertTrue(auto.should_nudge(info, now=100000))
+
 
 if __name__ == "__main__":
     unittest.main()
