@@ -74,6 +74,19 @@ except Exception as _startup_error:
     raise
 
 
+# A queued/running CI request must suppress routine nudges, but it must never suppress
+# delivery of the assignment itself. In particular, a transient image-match or submit
+# failure can leave prompt_confirmed=False while CI becomes active; the core policy would
+# otherwise visit the tab indefinitely without retrying the missing prompt.
+_core_should_nudge = should_nudge
+
+
+def should_nudge(info, now=None):
+    if info.get("prompt_confirmed") is False:
+        return True
+    return _core_should_nudge(info, now=now)
+
+
 def task_prompt(number, task_id, work_kind=None):
     """Supply assignment identity plus a short pointer to authoritative repo policy."""
     work_kind = work_kind or scene_work_kind(task_id)
