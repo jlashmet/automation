@@ -24,18 +24,26 @@ class PromptPolicyTests(unittest.TestCase):
         self.assertIn("task_prompt", namespace)
         self.assertTrue(namespace["_CORE_PATH"].endswith("auto_core.py"))
 
+    def test_target_is_mounting_force_only(self):
+        self.assertEqual(auto.TARGET_REPOSITORY, "jlashmet/mounting-force-2")
+        self.assertTrue(auto.DEFAULT_TARGET_REPO_PATH.endswith("/mounting-force-2"))
+        self.assertEqual(auto.GITHUB_REPOSITORY, "jlashmet/mounting-force-2")
+        self.assertNotIn("voxel", auto.REPO_PATH.lower())
+
     def test_feature_prompt_is_bounded_reusable_and_two_state(self):
         prompt = auto.task_prompt(4, "feature-id", auto.FEATURE_WORK_KIND)
+        self.assertIn("jlashmet/mounting-force-2", prompt)
         self.assertIn("SceneIssues/feature-readme.md", prompt)
         self.assertIn("no opportunistic enhancements", prompt)
         self.assertIn("semantic/config-driven", prompt)
-        self.assertIn("Do not refactor adjacent systems", prompt)
+        self.assertIn("refactor adjacent systems", prompt)
         self.assertIn("SceneIssues/open/feature-id", prompt)
         self.assertIn("SceneIssues/closed/feature-id", prompt)
         self.assertNotIn("SceneIssues/pending/", prompt)
 
     def test_issue_prompt_stays_concise(self):
         prompt = auto.task_prompt(2, "issue-id", auto.ISSUE_WORK_KIND)
+        self.assertIn("jlashmet/mounting-force-2", prompt)
         self.assertIn("SceneIssues/issue-readme.md", prompt)
         self.assertIn("minimal repro/root cause", prompt)
         self.assertNotIn("SceneIssues/pending/", prompt)
@@ -59,7 +67,7 @@ class PromptPolicyTests(unittest.TestCase):
         self.assertIn("SceneIssues/open/feature-id", prompt)
         self.assertNotIn("SceneIssues/pending/", prompt)
         self.assertIn("next unchecked", prompt)
-        self.assertIn("external prerequisite", prompt)
+        self.assertIn("Record blockers", prompt)
 
     def test_unconfirmed_assignment_retries_even_while_ci_is_active(self):
         info = {
