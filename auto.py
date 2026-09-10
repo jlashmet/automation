@@ -19,15 +19,13 @@ def _script_dir():
     file_name = globals().get("__file__")
     if file_name:
         return os.path.dirname(os.path.abspath(file_name))
-    # Prefer the launched script path over Oculix's bundle path. The bundle path may
-    # point at a shared volume even when run.sh and the image assets are local.
     if sys.argv and sys.argv[0]:
         candidate = os.path.abspath(str(sys.argv[0]))
         if os.path.isfile(candidate):
             return os.path.dirname(candidate)
     get_bundle_path = globals().get("getBundlePath")
     if get_bundle_path:
-        bundle_path = get_bundle_path()
+        bundle_path = getBundlePath()
         if bundle_path:
             return os.path.abspath(str(bundle_path))
     return os.getcwd()
@@ -48,9 +46,6 @@ def _fatal_startup(message):
             pass
 
 
-# Pin Sikuli/Oculix image lookup to the local automation checkout before loading the
-# runtime. This keeps textbox.png, submit.png, in_progress_glyph.png, etc. local even
-# when Oculix has a shared-volume bundle path configured.
 _LOCAL_SCRIPT_DIR = _script_dir()
 _set_bundle_path = globals().get("setBundlePath")
 if _set_bundle_path:
@@ -59,8 +54,6 @@ if _set_bundle_path:
     except Exception:
         pass
 
-# Keep coordinator/state implementation separate from prompt policy. The implementation
-# still loads auto_core.py and provides durable repository-backed assignment state.
 try:
     _IMPL_PATH = os.path.join(_LOCAL_SCRIPT_DIR, "auto_runtime.py")
     _ENTRY_NAME = globals().get("__name__", "__main__")
@@ -69,8 +62,6 @@ try:
         _impl_code = compile(_impl_handle.read(), _IMPL_PATH, "exec")
     eval(_impl_code, globals(), globals())
     globals()["__name__"] = _ENTRY_NAME
-    # auto_core's image helpers join against SCRIPT_DIR. Override any bundle-derived
-    # value after bootstrap so all image reads stay in the local checkout.
     SCRIPT_DIR = _LOCAL_SCRIPT_DIR
 except Exception as _startup_error:
     globals()["__name__"] = globals().get("_ENTRY_NAME", "__main__")
@@ -78,9 +69,6 @@ except Exception as _startup_error:
     raise
 
 
-# Hard cutover: this coordinator has one target. Rebind all repository-sensitive globals
-# after the reusable runtime is loaded. The legacy defaults inside auto_core/auto_runtime
-# are never used by a live auto.py run.
 REPO_PATH = os.path.abspath(os.environ.get("MOUNTING_FORCE_REPO_PATH", DEFAULT_TARGET_REPO_PATH))
 GITHUB_REPOSITORY = TARGET_REPOSITORY
 SCENE_ISSUES_PATH = os.path.join(REPO_PATH, "SceneIssues")
@@ -109,8 +97,6 @@ def ensure_target_repository():
             (REPO_PATH, stdout.strip() or "<missing>", TARGET_REPOSITORY))
 
 
-# A missing initial assignment prompt must always be retried. Runtime state such as
-# legacy CI activity must not suppress delivery of the current master-only instructions.
 _core_should_nudge = should_nudge
 
 
@@ -125,11 +111,14 @@ def _master_workflow_text():
         "Use the Chat on Steroids plugin for all repository interaction: reading and editing code/files, "
         "running shell commands, and running tests. Work directly on `master`; do not create, checkout, "
         "or use a separate agent, feature, fixes, CI, or transport branch. Before editing, make sure the "
-        "working tree is on `master` and fetch/reconcile `origin/master` without discarding another agent's "
-        "valid work. Keep changes scoped to the assigned SceneIssue. Run the relevant tests through Chat on "
-        "Steroids and resolve failures caused by your work. When the assignment is genuinely complete, commit "
-        "the completed work on `master` and push it to `origin/master` non-force; if origin/master advanced, "
-        "reconcile it and retry the push."
+        "working tree is on `master` and pull/reconcile current `origin/master` without discarding another "
+        "agent's valid work. Periodically pull from `origin/master` while working so you stay current with "
+        "other agents, and resolve any conflicts carefully, preserving valid changes from both sides. Keep "
+        "changes scoped to the assigned SceneIssue. Run the relevant tests through Chat on Steroids and "
+        "resolve failures caused by your work. When the assignment is genuinely complete, commit the completed "
+        "work on `master` and push it to `origin/master` non-force; immediately before pushing, pull/reconcile "
+        "`origin/master` again, resolve any conflicts, rerun affected tests when reconciliation changes code, "
+        "then retry the push if master advances again."
     )
 
 
@@ -156,12 +145,12 @@ def task_prompt(number, task_id, work_kind=None):
         )
 
     return (
-        "You are %s. Work only on `%s` in `jlashmet/mounting-force-2`. Fetch origin, then follow "
-        "`AGENTS.md`, `SceneIssues/README.md`, and `%s`; those repo docs are authoritative unless they "
-        "conflict with this explicit execution policy: %s %s Keep blocked or incomplete work in open; "
-        "do not use `SceneIssues/pending`. Only after all required acceptance work is genuinely complete, "
-        "close to `%s`, set the required fixed metadata, commit on `master`, and push to `origin/master` "
-        "non-force. Do not self-select more work."
+        "You are %s. Work only on `%s` in `jlashmet/mounting-force-2`. Follow `AGENTS.md`, "
+        "`SceneIssues/README.md`, and `%s`; those repo docs are authoritative unless they conflict with "
+        "this explicit execution policy: %s %s Keep blocked or incomplete work in open; do not use "
+        "`SceneIssues/pending`. Only after all required acceptance work is genuinely complete, close to `%s`, "
+        "set the required fixed metadata, commit on `master`, and push to `origin/master` non-force. Do not "
+        "self-select more work."
         % (agent_id(number), open_path, guide, _master_workflow_text(), detail, closed_path))
 
 
@@ -189,7 +178,8 @@ def branch_cleanup_prompt(number, head=None):
     return (
         "Do not continue work on an old agent/feature branch%s. Use the Chat on Steroids plugin, switch to "
         "current `master`, reconcile any valid unfinished assignment work without discarding unrelated work, "
-        "finish and test only the assigned SceneIssue, then commit on `master` and push to `origin/master` "
+        "periodically pull `origin/master` and resolve conflicts while working, finish and test only the "
+        "assigned SceneIssue, then pull/reconcile once more, commit on `master`, and push to `origin/master` "
         "non-force. Do not start another SceneIssue."
         % ((" at `%s`" % head) if head else ""))
 
