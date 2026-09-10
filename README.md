@@ -35,11 +35,14 @@ Agents must:
 
 - use the **Chat on Steroids** plugin for repository interaction, including reading and editing code/files, running shell commands, and running tests;
 - work directly on `master` and **not** create or use `fixes/agent-N`, feature branches, CI branches, transport branches, or other per-agent development branches;
-- fetch and reconcile `origin/master` before and during work as needed, without discarding another agent's valid changes;
+- pull/reconcile the latest `origin/master` before beginning work, without discarding another agent's valid changes;
+- **periodically pull from `origin/master` while working** so they remain current with changes from other agents;
+- resolve merge conflicts carefully and preserve valid changes from both their assignment and other agents;
 - keep edits scoped to the assigned SceneIssue;
 - run the relevant tests through Chat on Steroids and fix failures caused by their work;
 - keep incomplete or blocked SceneIssues under `SceneIssues/open/`;
 - close a SceneIssue only after all required acceptance work is genuinely complete;
+- immediately before committing/pushing completed work, pull/reconcile `origin/master` again, resolve any conflicts, and rerun affected tests if reconciliation changed code;
 - commit completed work directly on `master` and push it to `origin/master` non-force;
 - if `origin/master` advances before push, reconcile the new master and retry rather than force-pushing.
 
@@ -73,6 +76,6 @@ python3 -m unittest -v test_auto.py test_assignment_persistence.py test_prompt_p
 
 ## Prompt policy
 
-`auto.py` sends assignment identity plus the execution policy above. The prompts explicitly require Chat on Steroids, direct work on `master`, local test execution through the plugin, and a non-force push to `origin/master` only after the assigned SceneIssue is complete.
+`auto.py` sends assignment identity plus the execution policy above. The prompts explicitly require Chat on Steroids, direct work on `master`, periodic reconciliation with `origin/master`, conflict resolution, local test execution through the plugin, and a non-force push to `origin/master` only after the assigned SceneIssue is complete.
 
 `auto_runtime.py` and `auto_core.py` retain the reusable coordinator/state implementation; `auto.py` is the target binding and prompt-policy layer.
