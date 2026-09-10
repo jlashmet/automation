@@ -2,7 +2,7 @@
 
 `auto.py` coordinates up to nine browser-tab workers for `jlashmet/mounting-force-2`.
 
-The automation repo owns only coordination mechanics: tab assignment, durable assignment ownership, CI activity detection, and concise nudges. It does not define the SceneIssue development/validation/merge workflow. Workers must read the Mounting Force repository's `AGENTS.md`, `SceneIssues/README.md`, and the assignment-specific issue/feature guide; those files are authoritative.
+The automation repo owns coordination mechanics and the worker execution policy. Workers must also read the Mounting Force repository's `AGENTS.md`, `SceneIssues/README.md`, and the assignment-specific issue/feature guide.
 
 The old `jlashmet/voxel` repository is no longer an automation target.
 
@@ -16,7 +16,7 @@ The default checkout is:
 
 Set `MOUNTING_FORCE_REPO_PATH` only when that checkout lives elsewhere. On startup the coordinator reads the checkout's `origin` URL and refuses to run unless it resolves to `jlashmet/mounting-force-2`; this prevents an old path from sending work into another repository.
 
-`MOUNTING_FORCE_ASSIGNMENT_BRANCH` may override the default durable coordination branch `automation/assignments`.
+`MOUNTING_FORCE_ASSIGNMENT_BRANCH` may override the durable coordination branch `automation/assignments`. That branch is coordinator state only; agents do not develop on it.
 
 ## State
 
@@ -27,14 +27,23 @@ Queue state comes from `origin/master` in Mounting Force:
 
 Durable worker ownership is stored in each open SceneIssue's `issue.json` on the repository's `automation/assignments` coordination branch. UI heartbeat/backoff state is process-local. This lets the coordinator move between computers without copying a local registry file.
 
-Each browser slot reuses:
+## Agent execution policy
 
-```text
-fixes/agent-N
-ci-test/fixes/agent-N
-```
+All agents now work directly on the shared `master` branch.
 
-The coordinator does not invent extra feature or CI branches.
+Agents must:
+
+- use the **Chat on Steroids** plugin for repository interaction, including reading and editing code/files, running shell commands, and running tests;
+- work directly on `master` and **not** create or use `fixes/agent-N`, feature branches, CI branches, transport branches, or other per-agent development branches;
+- fetch and reconcile `origin/master` before and during work as needed, without discarding another agent's valid changes;
+- keep edits scoped to the assigned SceneIssue;
+- run the relevant tests through Chat on Steroids and fix failures caused by their work;
+- keep incomplete or blocked SceneIssues under `SceneIssues/open/`;
+- close a SceneIssue only after all required acceptance work is genuinely complete;
+- commit completed work directly on `master` and push it to `origin/master` non-force;
+- if `origin/master` advances before push, reconcile the new master and retry rather than force-pushing.
+
+The coordinator's `automation/assignments` branch remains only a durable claim/state mechanism. It must not be treated as an agent development branch.
 
 ## Run
 
@@ -62,19 +71,8 @@ python3 -m unittest -v test_auto.py test_assignment_persistence.py test_prompt_p
 
 `--check` also exercises the target-repository guard, so a stale or incorrect checkout fails before any browser tab is touched.
 
-## CI prerequisite
-
-Mounting Force contains `.github/workflows/tests-single.yml`. Its exact-SHA validation job uses a self-hosted macOS runner with the project's Unity version installed and runs:
-
-```sh
-./Scripts/validate.sh
-./Scripts/validate-engine.sh
-```
-
-Because self-hosted runner registration is repository-scoped unless configured at a broader GitHub account/organization level, make sure the Mac runner used for this automation is registered/available to `jlashmet/mounting-force-2`. A runner still registered only to the retired voxel repository will not pick up these jobs.
-
 ## Prompt policy
 
-`auto.py` intentionally sends short prompts containing only assignment identity/state and links back to the Mounting Force workflow docs. Final implementation, testing, exact-SHA CI behavior, acceptance rules, and closure rules belong in `mounting-force-2`, not duplicated here.
+`auto.py` sends assignment identity plus the execution policy above. The prompts explicitly require Chat on Steroids, direct work on `master`, local test execution through the plugin, and a non-force push to `origin/master` only after the assigned SceneIssue is complete.
 
 `auto_runtime.py` and `auto_core.py` retain the reusable coordinator/state implementation; `auto.py` is the target binding and prompt-policy layer.
