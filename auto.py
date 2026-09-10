@@ -109,10 +109,8 @@ def ensure_target_repository():
             (REPO_PATH, stdout.strip() or "<missing>", TARGET_REPOSITORY))
 
 
-# A queued/running CI request must suppress routine nudges, but it must never suppress
-# delivery of the assignment itself. In particular, a transient image-match or submit
-# failure can leave prompt_confirmed=False while CI becomes active; the core policy would
-# otherwise visit the tab indefinitely without retrying the missing prompt.
+# A missing initial assignment prompt must always be retried. Runtime state such as
+# legacy CI activity must not suppress delivery of the current master-only instructions.
 _core_should_nudge = should_nudge
 
 
@@ -122,12 +120,23 @@ def should_nudge(info, now=None):
     return _core_should_nudge(info, now=now)
 
 
+def _master_workflow_text():
+    return (
+        "Use the Chat on Steroids plugin for all repository interaction: reading and editing code/files, "
+        "running shell commands, and running tests. Work directly on `master`; do not create, checkout, "
+        "or use a separate agent, feature, fixes, CI, or transport branch. Before editing, make sure the "
+        "working tree is on `master` and fetch/reconcile `origin/master` without discarding another agent's "
+        "valid work. Keep changes scoped to the assigned SceneIssue. Run the relevant tests through Chat on "
+        "Steroids and resolve failures caused by your work. When the assignment is genuinely complete, commit "
+        "the completed work on `master` and push it to `origin/master` non-force; if origin/master advanced, "
+        "reconcile it and retry the push."
+    )
+
+
 def task_prompt(number, task_id, work_kind=None):
-    """Supply assignment identity plus a short pointer to authoritative repo policy."""
+    """Supply assignment identity plus the master-only Chat on Steroids workflow."""
     work_kind = work_kind or scene_work_kind(task_id)
     guide = workflow_path(work_kind)
-    branch_name = feature_branch(number)
-    ci_branch_name = ci_branch(number)
     open_path = "SceneIssues/open/%s" % task_id
     closed_path = "SceneIssues/closed/%s" % task_id
 
@@ -147,80 +156,42 @@ def task_prompt(number, task_id, work_kind=None):
         )
 
     return (
-        "You are %s. Work only on `%s` in `jlashmet/mounting-force-2` on `%s`; `%s` is your only "
-        "targeted-CI transport. Fetch origin, then follow `AGENTS.md`, `SceneIssues/README.md`, and "
-        "`%s`; those repo docs are authoritative. %s Never replace queued/running CI. Use exact-SHA "
-        "CI as documented. Keep blocked or incomplete work in open; do not use `SceneIssues/pending`. "
-        "After green exact-SHA validation and completed acceptance, close to `%s`, set the required "
-        "fixed metadata, merge current `origin/master`, and push the exact feature head to "
-        "`origin/master` non-force. Do not self-select more work."
-        % (agent_id(number), open_path, branch_name, ci_branch_name, guide, detail, closed_path))
+        "You are %s. Work only on `%s` in `jlashmet/mounting-force-2`. Fetch origin, then follow "
+        "`AGENTS.md`, `SceneIssues/README.md`, and `%s`; those repo docs are authoritative unless they "
+        "conflict with this explicit execution policy: %s %s Keep blocked or incomplete work in open; "
+        "do not use `SceneIssues/pending`. Only after all required acceptance work is genuinely complete, "
+        "close to `%s`, set the required fixed metadata, commit on `master`, and push to `origin/master` "
+        "non-force. Do not self-select more work."
+        % (agent_id(number), open_path, guide, _master_workflow_text(), detail, closed_path))
 
 
 def continuation_prompt(number, task_id, info=None):
     work_kind = (info or {}).get("work_kind") or scene_work_kind(task_id)
     guide = workflow_path(work_kind)
-    gate = (info or {}).get("completion_gate") or {}
-    state = gate.get("state")
-    ci_branch_name = gate.get("ci_branch") or ci_branch(number)
-    ci_head = gate.get("ci_head") or "<missing>"
-    fix_commit = gate.get("fix_commit") or "<missing>"
     open_path = "SceneIssues/open/%s" % task_id
     closed_path = "SceneIssues/closed/%s" % task_id
 
-    if state in ("close_and_merge", "merge_to_master"):
-        feature_check = (
-            "First confirm every `tasks.md` checkbox and acceptance criterion. "
-            if work_kind == FEATURE_WORK_KIND else "")
-        return (
-            "%s is verified. %sClose `%s` to `%s` if needed, set status=`fixed`, `resolvedUtc`, "
-            "`resolutionSummary`, `regressionTest`, and `fixCommit`, then fetch/merge current "
-            "`origin/master` and push the exact `%s` head to `origin/master` non-force. If master "
-            "advanced, merge/retry."
-            % (task_id, feature_check, open_path, closed_path, feature_branch(number)))
-    if state == "missing_branch":
-        return (
-            "%s: `%s` is missing. Create the next exact-SHA request from the source containing "
-            "fixCommit %s and monitor `ci/single-test`." % (task_id, ci_branch_name, fix_commit))
-    if state == "missing_fix":
-        return (
-            "%s: `%s` at %s lacks fixCommit %s. Create a fresh request on that same transport from "
-            "the correct source and monitor it." % (task_id, ci_branch_name, ci_head, fix_commit))
-    if state == "not_created":
-        return (
-            "%s: no exact-SHA `Tests (single)` run exists for `%s` at %s. Leave active CI alone; "
-            "after the documented admission window, update only the assigned CI ref."
-            % (task_id, ci_branch_name, ci_head))
-    if state in ("queued", "in_progress", "waiting", "requested", "pending"):
-        return "%s: `%s` at %s is %s. Monitor it without replacement." % (
-            task_id, ci_branch_name, ci_head, state)
-    if state in ("failure", "error", "cancelled", "timed_out", "action_required"):
-        return (
-            "%s: `%s` at %s reported validation=%s. Inspect evidence; fix product failures or retry "
-            "only proven infrastructure failure, then reuse this same CI transport. Never replace "
-            "active CI."
-            % (task_id, ci_branch_name, ci_head, state))
-
-    extra = (
-        " Keep `plan.md`/`tasks.md` current, work the next unchecked non-blocked item, and do not "
-        "close with any required task unchecked."
+    feature_check = (
+        "Keep `plan.md`/`tasks.md` current, work the next unchecked non-blocked item, and do not close "
+        "with any required task unchecked. "
         if work_kind == FEATURE_WORK_KIND else
-        " Work the next non-blocked acceptance item and keep the issue open until verified.")
+        "Work the next non-blocked acceptance item and keep the issue open until verified. "
+    )
     return (
-        "Continue only `%s` in `jlashmet/mounting-force-2` on `%s`. Follow `AGENTS.md`, "
-        "`SceneIssues/README.md`, and `%s`.%s Record blockers and continue independent work where "
-        "possible; do not change acceptance or self-select another SceneIssue."
-        % (open_path, feature_branch(number), guide, extra))
+        "Continue only `%s` in `jlashmet/mounting-force-2`. Follow `AGENTS.md`, `SceneIssues/README.md`, "
+        "and `%s`. %s%s Record blockers and continue independent work where possible; do not change "
+        "acceptance or self-select another SceneIssue. When all acceptance work is complete, close to `%s`, "
+        "set the required fixed metadata, commit directly on `master`, and push to `origin/master` non-force."
+        % (open_path, guide, _master_workflow_text(), feature_check, closed_path))
 
 
 def branch_cleanup_prompt(number, head=None):
-    branch_name = feature_branch(number)
     return (
-        "%s still has prior-assignment work not on current Mounting Force master%s. Reconcile only "
-        "that work against current master and follow `AGENTS.md` plus `SceneIssues/README.md`. If "
-        "valid work remains, finish/validate it and use the normal non-force master promotion path; "
-        "do not start another SceneIssue."
-        % (branch_name, (" at `%s`" % head) if head else ""))
+        "Do not continue work on an old agent/feature branch%s. Use the Chat on Steroids plugin, switch to "
+        "current `master`, reconcile any valid unfinished assignment work without discarding unrelated work, "
+        "finish and test only the assigned SceneIssue, then commit on `master` and push to `origin/master` "
+        "non-force. Do not start another SceneIssue."
+        % ((" at `%s`" % head) if head else ""))
 
 
 if globals().get("__name__") == "__main__":
