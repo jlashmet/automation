@@ -41,26 +41,22 @@ class PromptPolicyTests(unittest.TestCase):
         self.assertIn("SceneIssues/closed/feature-id", prompt)
         self.assertNotIn("SceneIssues/pending/", prompt)
 
-    def test_issue_prompt_stays_concise(self):
+    def test_issue_prompt_requires_chat_on_steroids_and_master(self):
         prompt = auto.task_prompt(2, "issue-id", auto.ISSUE_WORK_KIND)
-        self.assertIn("jlashmet/mounting-force-2", prompt)
-        self.assertIn("SceneIssues/issue-readme.md", prompt)
-        self.assertIn("minimal repro/root cause", prompt)
-        self.assertNotIn("SceneIssues/pending/", prompt)
-        self.assertLessEqual(len(prompt.split()), 150)
+        self.assertIn("Chat on Steroids", prompt)
+        self.assertIn("Work directly on `master`", prompt)
+        self.assertIn("push to `origin/master`", prompt)
+        self.assertNotIn("fixes/agent-2", prompt)
+        self.assertNotIn("ci-test/fixes/agent-2", prompt)
 
-    def test_completed_ci_failure_reuses_only_assigned_transport(self):
-        prompt = auto.continuation_prompt(9, "water", {
-            "completion_gate": {
-                "state": "failure",
-                "ci_branch": "ci-test/fixes/agent-9",
-                "ci_head": "abc123",
-            },
-        })
-        self.assertIn("reuse this same CI transport", prompt)
-        self.assertIn("Never replace active CI", prompt)
+    def test_prompt_requires_periodic_origin_master_reconciliation(self):
+        prompt = auto.task_prompt(3, "issue-id", auto.ISSUE_WORK_KIND)
+        self.assertIn("Periodically pull from `origin/master`", prompt)
+        self.assertIn("resolve any conflicts carefully", prompt)
+        self.assertIn("preserving valid changes from both sides", prompt)
+        self.assertIn("immediately before pushing", prompt)
 
-    def test_generic_continuation_keeps_task_open_until_close(self):
+    def test_generic_continuation_keeps_same_master_policy(self):
         prompt = auto.continuation_prompt(5, "feature-id", {
             "work_kind": auto.FEATURE_WORK_KIND,
         })
@@ -68,6 +64,16 @@ class PromptPolicyTests(unittest.TestCase):
         self.assertNotIn("SceneIssues/pending/", prompt)
         self.assertIn("next unchecked", prompt)
         self.assertIn("Record blockers", prompt)
+        self.assertIn("Chat on Steroids", prompt)
+        self.assertIn("Periodically pull from `origin/master`", prompt)
+        self.assertIn("commit directly on `master`", prompt)
+
+    def test_old_branch_cleanup_redirects_to_master(self):
+        prompt = auto.branch_cleanup_prompt(9, "abc123")
+        self.assertIn("Do not continue work on an old agent/feature branch", prompt)
+        self.assertIn("current `master`", prompt)
+        self.assertIn("periodically pull `origin/master`", prompt)
+        self.assertIn("push to `origin/master`", prompt)
 
     def test_unconfirmed_assignment_retries_even_while_ci_is_active(self):
         info = {
@@ -76,7 +82,6 @@ class PromptPolicyTests(unittest.TestCase):
             "prompt_confirmed": False,
             "ci_activity": {"state": "in_progress"},
         }
-
         self.assertTrue(auto.should_nudge(info, now=100000))
 
 
