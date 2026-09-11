@@ -109,16 +109,18 @@ def should_nudge(info, now=None):
 def _master_workflow_text():
     return (
         "Use the Chat on Steroids plugin for all repository interaction: reading and editing code/files, "
-        "running shell commands, and running tests. Work directly on `master`; do not create, checkout, "
-        "or use a separate agent, feature, fixes, CI, or transport branch. Before editing, make sure the "
-        "working tree is on `master` and pull/reconcile current `origin/master` without discarding another "
-        "agent's valid work. Periodically pull from `origin/master` while working so you stay current with "
-        "other agents, and resolve any conflicts carefully, preserving valid changes from both sides. Keep "
-        "changes scoped to the assigned SceneIssue. Run the relevant tests through Chat on Steroids and "
-        "resolve failures caused by your work. When the assignment is genuinely complete, commit the completed "
-        "work on `master` and push it to `origin/master` non-force; immediately before pushing, pull/reconcile "
-        "`origin/master` again, resolve any conflicts, rerun affected tests when reconciliation changes code, "
-        "then retry the push if master advances again."
+        "running shell commands, and running tests. Chat on Steroids can fail intermittently or temporarily "
+        "report that the plugin is unavailable, disabled, or conflicted; treat these as transient failures and "
+        "keep retrying the same operation rather than abandoning the tool or switching workflows. Work directly "
+        "on `master`; do not create, checkout, or use a separate agent, feature, fixes, CI, or transport branch. "
+        "Before editing, make sure the working tree is on `master` and pull/reconcile current `origin/master` "
+        "without discarding another agent's valid work. Periodically pull from `origin/master` while working so "
+        "you stay current with other agents, and resolve any conflicts carefully, preserving valid changes from "
+        "both sides. Keep changes scoped to the assigned SceneIssue. Run the relevant tests through Chat on "
+        "Steroids and resolve failures caused by your work. When the assignment is genuinely complete, commit "
+        "the completed work on `master` and push it to `origin/master` non-force; immediately before pushing, "
+        "pull/reconcile `origin/master` again, resolve any conflicts, rerun affected tests when reconciliation "
+        "changes code, then retry the push if master advances again."
     )
 
 
