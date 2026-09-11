@@ -49,6 +49,13 @@ class PromptPolicyTests(unittest.TestCase):
         self.assertNotIn("fixes/agent-2", prompt)
         self.assertNotIn("ci-test/fixes/agent-2", prompt)
 
+    def test_prompt_requires_retrying_transient_chat_on_steroids_failures(self):
+        prompt = auto.task_prompt(2, "issue-id", auto.ISSUE_WORK_KIND)
+        self.assertIn("fail intermittently", prompt)
+        self.assertIn("transient failures", prompt)
+        self.assertIn("keep retrying the same operation", prompt)
+        self.assertIn("rather than abandoning the tool or switching workflows", prompt)
+
     def test_prompt_requires_periodic_origin_master_reconciliation(self):
         prompt = auto.task_prompt(3, "issue-id", auto.ISSUE_WORK_KIND)
         self.assertIn("Periodically pull from `origin/master`", prompt)
