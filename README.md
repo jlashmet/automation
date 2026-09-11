@@ -34,6 +34,7 @@ All agents now work directly on the shared `master` branch.
 Agents must:
 
 - use the **Chat on Steroids** plugin for repository interaction, including reading and editing code/files, running shell commands, and running tests;
+- expect occasional transient Chat on Steroids failures (including temporarily unavailable/disabled/conflicted errors) and keep retrying the same operation rather than abandoning the plugin or switching workflows;
 - work directly on `master` and **not** create or use `fixes/agent-N`, feature branches, CI branches, transport branches, or other per-agent development branches;
 - pull/reconcile the latest `origin/master` before beginning work, without discarding another agent's valid changes;
 - **periodically pull from `origin/master` while working** so they remain current with changes from other agents;
