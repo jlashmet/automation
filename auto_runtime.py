@@ -36,13 +36,12 @@ _core_file_save_registry = save_registry
 
 # Assignment ownership is repository state, not coordinator-machine state. Keep the
 # existing core's in-memory registry shape so the UI/lease code stays unchanged, but
-# reconstruct and persist durable ownership through each open SceneIssue's issue.json
-# on an unprotected coordination branch. Queue/open/closed truth remains on master.
-REPO_PATH = os.path.abspath(os.environ.get("VOXEL_REPO_PATH", REPO_PATH))
+# reconstruct and persist durable ownership through each active SceneIssue's issue.json
+# on an unprotected coordination branch. Queue/open/pending/closed truth remains on main.
+REPO_PATH = os.path.abspath(os.environ.get("MOUNTING_FORCE_REPO_PATH", REPO_PATH))
 SCENE_ISSUES_PATH = os.path.join(REPO_PATH, "SceneIssues")
 OPEN_SCENE_ISSUES_PATH = os.path.join(SCENE_ISSUES_PATH, "open")
-PENDING_SCENE_ISSUES_PATH = os.path.join(SCENE_ISSUES_PATH, "pending")
-ASSIGNMENT_BRANCH = os.environ.get("VOXEL_ASSIGNMENT_BRANCH", "automation/assignments")
+ASSIGNMENT_BRANCH = os.environ.get("MOUNTING_FORCE_ASSIGNMENT_BRANCH", "automation/assignments")
 ASSIGNMENT_REF = "refs/remotes/%s/%s" % (REMOTE, ASSIGNMENT_BRANCH)
 ASSIGNMENT_REMOTE_REF = "refs/heads/%s" % ASSIGNMENT_BRANCH
 REGISTRY_PATH = "SceneIssue issue.json on origin/%s" % ASSIGNMENT_BRANCH
@@ -85,7 +84,7 @@ def read_json_at_ref(ref_name, repo_relative_path):
 
 
 def ensure_assignment_ref():
-    """Create the durable coordination branch from current master if it does not exist."""
+    """Create the durable coordination branch from the current queue ref if it does not exist."""
     if ref_exists(ASSIGNMENT_REF):
         return
     fetch_remote()
@@ -94,6 +93,7 @@ def ensure_assignment_ref():
     unused_code, master_sha, unused_stderr = run_git(["rev-parse", QUEUE_REF])
     master_sha = master_sha.strip()
     code, unused_stdout, stderr = run_git([
+        "-c", "core.hooksPath=/dev/null",
         "push", REMOTE, "%s:%s" % (master_sha, ASSIGNMENT_REMOTE_REF),
     ], check=False)
     if code == 0:
@@ -107,10 +107,10 @@ def ensure_assignment_ref():
 
 
 def assignment_issue_path(task_id, ref_name=None):
-    """Return the issue.json path currently authoritative as open on master."""
-    if task_id not in list_open_tasks(QUEUE_REF):
+    """Return the issue.json path currently authoritative as open or pending on main."""
+    if task_id not in list_available_tasks(QUEUE_REF):
         return None
-    return "SceneIssues/open/%s/issue.json" % task_id
+    return task_issue_path(task_id, QUEUE_REF)
 
 
 def _issue_assignment(issue):
@@ -125,7 +125,7 @@ def _persistent_assignment(info):
     if not info or info.get("status") != "in_progress":
         return None
     result = OrderedDict()
-    for key in ("owner", "branch", "ci_branch", "claimed_at", "lease_history"):
+    for key in ("owner", "branch", "ci_branch", "claimed_at", "lease_history", "role"):
         if key in info:
             result[key] = info[key]
     return result
@@ -155,11 +155,11 @@ def load_registry(ref_name=None, now=None):
     persisted = {}
     if not ref_exists(ref_name):
         return {"version": 2, "tasks": tasks, "_persisted_assignments": persisted}
-    for task_id in list_open_tasks(QUEUE_REF):
-        path = "SceneIssues/open/%s/issue.json" % task_id
+    for task_id in list_available_tasks(QUEUE_REF):
+        path = task_issue_path(task_id, QUEUE_REF)
         issue = read_json_at_ref(ref_name, path)
         assignment = _issue_assignment(issue)
-        if not assignment:
+        if not assignment or assignment.get("role", "implementer") != task_role(task_id):
             continue
         persisted[task_id] = assignment
         runtime = _runtime_assignment(assignment, now=now)
@@ -179,16 +179,20 @@ def _replace_registry_from_remote(registry, now=None):
     ephemeral_top = dict(
         (key, value) for key, value in registry.items()
         if key not in ("version", "tasks", "_persisted_assignments"))
-    durable_keys = set(("owner", "branch", "ci_branch", "claimed_at", "lease_history", "status"))
+    durable_keys = set(("owner", "branch", "ci_branch", "claimed_at", "lease_history", "role", "status"))
     for task_id, remote_info in remote["tasks"].items():
         local_info = registry.get("tasks", {}).get(task_id)
-        if local_info and local_info.get("owner") == remote_info.get("owner"):
+        if local_info and local_info.get("owner") == remote_info.get("owner") and \
+                local_info.get("role", "implementer") == remote_info.get("role", "implementer"):
             for key, value in local_info.items():
                 if key not in durable_keys:
                     remote_info[key] = value
             remote_info["last_heartbeat"] = max(
                 float(local_info.get("last_heartbeat") or 0),
                 float(remote_info.get("last_heartbeat") or 0))
+    for task_id in registry.get("tasks", {}):
+        if task_id not in remote["tasks"]:
+            remove_handoff(task_id)
     registry.clear()
     registry.update(remote)
     registry.update(ephemeral_top)
@@ -208,7 +212,7 @@ def _adopt_remote_assignment(registry, task_id, remote_assignment):
 
 
 def _create_assignment_commit(master_sha, parent_sha, updates):
-    """Create a coordination-branch commit from the latest master tree without checkout."""
+    """Create a coordination-branch commit from the latest queue tree without checkout."""
     descriptor, index_path = tempfile.mkstemp(prefix="auto-assignment-index-")
     os.close(descriptor)
     try:
@@ -256,14 +260,19 @@ def save_registry(registry, path=None):
         return False
 
     for unused_attempt in range(MASTER_UPDATE_RETRIES):
+        log("assignment persistence: fetching remote")
         fetch_remote()
+        log("assignment persistence: fetch complete; ensuring assignment ref")
         ensure_assignment_ref()
+        log("assignment persistence: assignment ref ready; resolving refs")
         unused_code, parent_sha, unused_stderr = run_git(["rev-parse", ASSIGNMENT_REF])
         unused_code, master_sha, unused_stderr = run_git(["rev-parse", QUEUE_REF])
         parent_sha = parent_sha.strip()
         master_sha = master_sha.strip()
+        log("assignment persistence: loading remote registry")
         remote_registry = load_registry(ref_name=ASSIGNMENT_REF)
         remote_persisted = OrderedDict(remote_registry.get("_persisted_assignments") or {})
+        log("assignment persistence: remote registry loaded")
         accepted = []
 
         for task_id in list(dirty):
@@ -276,6 +285,9 @@ def save_registry(registry, path=None):
                 _adopt_remote_assignment(registry, task_id, remote_assignment)
                 continue
             local_assignment = _persistent_assignment(registry.get("tasks", {}).get(task_id))
+            if local_assignment and local_assignment.get("role", "implementer") != task_role(task_id):
+                _adopt_remote_assignment(registry, task_id, remote_assignment)
+                continue
             if local_assignment:
                 remote_persisted[task_id] = local_assignment
             else:
@@ -296,11 +308,15 @@ def save_registry(registry, path=None):
             issue[ASSIGNMENT_FIELD] = assignment
             updates[path] = json.dumps(issue, indent=2) + "\n"
 
+        log("assignment persistence: creating coordination commit")
         commit_sha = _create_assignment_commit(master_sha, parent_sha, updates)
+        log("assignment persistence: coordination commit created; pushing")
         code, unused_stdout, stderr = run_git([
+            "-c", "core.hooksPath=/dev/null",
             "push", REMOTE, "%s:%s" % (commit_sha, ASSIGNMENT_REMOTE_REF),
         ], check=False)
         if code == 0:
+            log("assignment persistence: push complete; updating local ref")
             run_git(["update-ref", ASSIGNMENT_REF, commit_sha])
             registry["_persisted_assignments"] = OrderedDict(remote_persisted)
             return True
@@ -321,7 +337,7 @@ def sync_remote_and_registry(registry):
     _replace_registry_from_remote(registry)
     refresh_ci_activity(registry)
     reconcile_assignments(registry)
-    return list_open_tasks()
+    return list_available_tasks()
 
 
 def task_prompt(number, task_id, work_kind=None):
@@ -346,13 +362,13 @@ def task_prompt(number, task_id, work_kind=None):
             "behavioral regression, validate the built scene, and check blast radius/cost."
         )
 
-    return """You are {name}. Work only on `{task}` on `{branch}`; `{ci_branch}` is your only targeted-CI transport. Fetch origin and resume the branch, or create it from `origin/master`.
+    return """You are {name}. Work only on `{task}` on `{branch}`; `{ci_branch}` is your only targeted-CI transport. Fetch origin and resume the branch, or create it from `origin/main`.
 
 Follow `AGENTS.md`, `{guide}`, and common `SceneIssues/README.md`. {directions} If an external prerequisite is unavailable, record the blocker and continue independent work; do not change acceptance. If the same acceptance symptom/assertion fails after two materially different fixes, isolate a minimal repro/root cause before another fix.
 
 Never replace queued/running CI. After a completed failure, fix the cause or retry proven infrastructure failure using the same CI transport.
 
-Do not close until every required checkbox and acceptance criterion is validated. After green exact-SHA gates, move `SceneIssues/open/{task}` directly to `SceneIssues/closed/{task}`, set `status=fixed` and `resolvedUtc`, merge current `origin/master`, and push that exact feature head to `origin/master` non-force. If master advances, fetch/merge/retry. Do not modify another assignment, put `.github/test-request.json` on the feature branch, create alternate CI transports, or self-select more work.""".format(
+Do not publish partial work to `origin/main`. Keep the feature isolated until every required checkbox and acceptance criterion is complete and all required exact-SHA tests/gates are green. Only then perform final reconciliation from current `origin/main`; if reconciliation changes the candidate, rerun affected validation before the single final non-force promotion to `origin/main`. Do not modify another assignment, put `.github/test-request.json` on the feature branch, create alternate CI transports, or self-select more work.""".format(
         name=name,
         task=task_id,
         branch=branch_name,
@@ -372,10 +388,12 @@ def continuation_prompt(number, task_id, info=None):
     fix_commit = gate.get("fix_commit") or "<missing>"
 
     if state in ("close_and_merge", "merge_to_master"):
-        return ("%s is verified. Confirm all required checkboxes/acceptance are complete, move "
-                "`SceneIssues/open/%s` to `SceneIssues/closed/%s` if not already closed, set "
-                "status=`fixed` and `resolvedUtc`, then fetch/merge current `origin/master` and push "
-                "the exact `%s` head to `origin/master` non-force. If master advances, merge/retry." % (
+        return ("%s is verified. Confirm the entire SceneIssue is complete and all required tests/gates "
+                "are green before publishing anything to main. Move `SceneIssues/open/%s` to "
+                "`SceneIssues/closed/%s` if not already closed, set status=`fixed` and `resolvedUtc`, "
+                "then reconcile from current `origin/main`. If reconciliation changes the candidate, "
+                "rerun affected validation before the single final non-force promotion of exact `%s` "
+                "to `origin/main`." % (
                     task_id, task_id, task_id, feature_branch(number)))
 
     if state == "missing_branch":

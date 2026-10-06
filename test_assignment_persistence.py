@@ -37,10 +37,13 @@ class AssignmentPersistenceTests(unittest.TestCase):
             handle.write("\n")
         self._git(seed, ["add", "."])
         self._git(seed, ["commit", "-m", "seed fixture"])
-        self._git(seed, ["branch", "-M", "master"])
-        self._git(seed, ["push", "-u", "origin", "master"])
+        self._git(seed, ["branch", "-M", "main"])
+        self._git(seed, ["push", "-u", "origin", "main"])
         self._git(seed, [
-            "push", "origin", "master:refs/heads/automation/assignments",
+            "push", "origin", "main:refs/heads/automation/assignments",
+        ])
+        subprocess.check_call([
+            "git", "--git-dir", self.remote, "symbolic-ref", "HEAD", "refs/heads/main",
         ])
 
         self.computer1 = self._clone("computer-1")
@@ -48,7 +51,7 @@ class AssignmentPersistenceTests(unittest.TestCase):
         self._saved_globals = {}
         for name in (
                 "REPO_PATH", "SCENE_ISSUES_PATH", "OPEN_SCENE_ISSUES_PATH",
-                "PENDING_SCENE_ISSUES_PATH", "REMOTE", "QUEUE_REF",
+                "REMOTE", "QUEUE_REF",
                 "ASSIGNMENT_BRANCH", "ASSIGNMENT_REF", "ASSIGNMENT_REMOTE_REF"):
             self._saved_globals[name] = getattr(auto, name)
         self.addCleanup(self._restore_globals)
@@ -85,9 +88,8 @@ class AssignmentPersistenceTests(unittest.TestCase):
         auto.REPO_PATH = repo
         auto.SCENE_ISSUES_PATH = os.path.join(repo, "SceneIssues")
         auto.OPEN_SCENE_ISSUES_PATH = os.path.join(auto.SCENE_ISSUES_PATH, "open")
-        auto.PENDING_SCENE_ISSUES_PATH = os.path.join(auto.SCENE_ISSUES_PATH, "pending")
         auto.REMOTE = "origin"
-        auto.QUEUE_REF = "origin/master"
+        auto.QUEUE_REF = "origin/main"
         auto.ASSIGNMENT_BRANCH = "automation/assignments"
         auto.ASSIGNMENT_REF = "refs/remotes/origin/automation/assignments"
         auto.ASSIGNMENT_REMOTE_REF = "refs/heads/automation/assignments"
@@ -135,6 +137,32 @@ class AssignmentPersistenceTests(unittest.TestCase):
         self.assertNotIn("last_heartbeat", durable)
         self.assertNotIn("last_prompted", durable)
         self.assertNotIn("prompt_count", durable)
+
+    def test_review_claim_survives_restart_and_rejection_releases_it(self):
+        self._use_repo(self.computer1)
+        registry = auto.load_registry(now=100)
+        auto.claim_new_task("agent-1", None, None, registry, auto.list_available_tasks(), now=101)
+        self.assertTrue(auto.save_registry(registry))
+        for source, destination, role in (("open", "pending", "reviewer"),
+                                          ("pending", "open", "implementer")):
+            root = os.path.join(self.computer1, "SceneIssues")
+            os.makedirs(os.path.join(root, destination), exist_ok=True)
+            os.rename(os.path.join(root, source, "task-001"),
+                      os.path.join(root, destination, "task-001"))
+            self._git(self.computer1, ["add", "."])
+            self._git(self.computer1, ["commit", "-m", "phase " + destination])
+            self._git(self.computer1, ["push", "origin", "main"])
+            self._use_repo(self.computer2)
+            registry = auto.load_registry(now=200)
+            self.assertIsNone(auto.get_agent_task("agent-1", registry))
+            self.assertEqual("task-001", auto.claim_new_task(
+                "agent-1", None, None, registry, auto.list_available_tasks(), now=201))
+            self.assertEqual(role, registry["tasks"]["task-001"]["role"])
+            self.assertTrue(auto.save_registry(registry))
+            self._use_repo(self.computer1)
+            restored = auto.load_registry(now=300)
+            self.assertEqual(role, restored["tasks"]["task-001"]["role"])
+            self.assertEqual("task-001", auto.get_agent_task("agent-1", restored))
 
 
 if __name__ == "__main__":

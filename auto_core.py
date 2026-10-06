@@ -36,40 +36,42 @@ def discover_script_dir():
 
 
 SCRIPT_DIR = discover_script_dir()
-REPO_PATH = "/Users/jlashmet/code/voxel"
+REPO_PATH = "/Users/jlashmet/Documents/Unreal Projects/MountingForce"
 SCENE_ISSUES_PATH = os.path.join(REPO_PATH, "SceneIssues")
 OPEN_SCENE_ISSUES_PATH = os.path.join(SCENE_ISSUES_PATH, "open")
-PENDING_SCENE_ISSUES_PATH = os.path.join(SCENE_ISSUES_PATH, "pending")
 REGISTRY_PATH = os.path.join(SCRIPT_DIR, "_registry.json")
 LOCK_PATH = os.path.join(SCRIPT_DIR, "_coordinator.lock")
 DIAGNOSTICS_PATH = os.path.join(SCRIPT_DIR, "_diagnostics")
+HANDOFF_DIR = os.path.join(SCRIPT_DIR, "_handoffs")
+MAX_HANDOFF_CHARS = 6000
 
-NUM_AGENTS = 9                         # browser tabs selected with Cmd+1 .. Cmd+9
+NUM_AGENTS = 1                         # browser tabs selected with Cmd+1 .. Cmd+9
+BROWSER_APP = "Google Chrome"
 REMOTE = "origin"
-QUEUE_REF = "origin/master"
-GITHUB_REPOSITORY = "jlashmet/voxel"
+QUEUE_REF = "origin/main"
+GITHUB_REPOSITORY = "jlashmet/mounting-force-unreal"
 FEATURE_BRANCH_TEMPLATE = "fixes/agent-{number}"
 CI_BRANCH_TEMPLATE = "ci-test/fixes/agent-{number}"
 
 POLL_WAIT_SECONDS = 3
 FETCH_INTERVAL_SECONDS = 10
-TAB_SETTLE_SECONDS = 5
+TAB_SETTLE_SECONDS = 0.35
 UI_STATE_TIMEOUT_SECONDS = 5
+FAST_UI_PROBE_SECONDS = 0.15
 TAB_REFRESH_AFTER_SECONDS = 20 * 60     # refresh stuck-busy or inactive tabs after 20 minutes
 STALE_SECONDS = 60 * 60                # reclaim after one hour without a visible live tab
-NUDGE_INTERVAL_SECONDS = 10 * 60
-MAX_NUDGE_INTERVAL_SECONDS = 30 * 60
+NUDGE_INTERVAL_SECONDS = 30
+MAX_NUDGE_INTERVAL_SECONDS = 30
 IMAGE_TIMEOUT_SECONDS = 5
 MIN_IMAGE_SIMILARITY = 0.95
 RUNNING_IMAGE = "in_progress_glyph.png"
 REGISTRY_READ_ATTEMPTS = 5
 REGISTRY_READ_RETRY_SECONDS = 0.25
 
-PENDING_STATUS = "pending"
 ISSUE_WORK_KIND = "issue"
 FEATURE_WORK_KIND = "feature"
-ISSUE_WORKFLOW_PATH = "SceneIssues/issue-readme.md"
-FEATURE_WORKFLOW_PATH = "SceneIssues/feature-readme.md"
+ISSUE_WORKFLOW_PATH = "SceneIssues/README.md"
+FEATURE_WORKFLOW_PATH = "SceneIssues/README.md"
 
 _lock_owned = False
 
@@ -202,6 +204,105 @@ def _text(value):
     return TEXT_TYPE(value)
 
 
+def _safe_handoff_name(task_id):
+    """Map a SceneIssue id to one local coordinator-owned handoff filename."""
+    value = _text(task_id)
+    safe = []
+    for character in value:
+        if character.isalnum() or character in ("-", "_", "."):
+            safe.append(character)
+        else:
+            safe.append("_")
+    return "".join(safe) or "unknown-task"
+
+
+def handoff_path(task_id):
+    return os.path.join(HANDOFF_DIR, "%s.md" % _safe_handoff_name(task_id))
+
+
+def ensure_handoff_dir():
+    if os.path.isdir(HANDOFF_DIR):
+        return HANDOFF_DIR
+    try:
+        os.makedirs(HANDOFF_DIR)
+    except OSError:
+        if not os.path.isdir(HANDOFF_DIR):
+            raise
+    return HANDOFF_DIR
+
+
+def read_handoff(task_id, max_chars=None):
+    """Read bounded local continuation context without trusting worker file size."""
+    max_chars = MAX_HANDOFF_CHARS if max_chars is None else max(0, int(max_chars))
+    path = handoff_path(task_id)
+    if max_chars == 0 or not os.path.isfile(path):
+        return ""
+
+    byte_window = max_chars * 4 + 4096
+    try:
+        with open(path, "rb") as handle:
+            head_bytes = handle.read(byte_window + 1)
+            has_more = len(head_bytes) > byte_window
+            if has_more:
+                handle.seek(0, 2)
+                size = handle.tell()
+                tail_size = min(size, byte_window)
+                handle.seek(-tail_size, 2)
+                tail_bytes = handle.read(tail_size)
+            else:
+                tail_bytes = head_bytes
+    except (IOError, OSError) as error:
+        log("could not read handoff for %s: %s" % (task_id, error))
+        return ""
+
+    head_value = _decode(head_bytes[:byte_window]).strip()
+    if not has_more and len(head_value) <= max_chars:
+        return head_value
+
+    tail_value = _decode(tail_bytes).strip()
+    marker = "\n\n[handoff truncated by coordinator]\n\n"
+    if max_chars <= len(marker):
+        return marker[:max_chars]
+    remaining = max_chars - len(marker)
+    head_chars = remaining // 2
+    tail_chars = remaining - head_chars
+    head_part = head_value[:head_chars].rstrip() if head_chars else ""
+    tail_part = tail_value[-tail_chars:].lstrip() if tail_chars else ""
+    return head_part + marker + tail_part
+
+
+def remove_handoff(task_id):
+    path = handoff_path(task_id)
+    try:
+        os.remove(path)
+        return True
+    except OSError:
+        return False
+
+
+def handoff_instructions(task_id):
+    """Tell a worker how to maintain bounded coordinator-owned recovery state."""
+    ensure_handoff_dir()
+    return (
+        "Maintain the local continuation handoff `%s` using Chat on Steroids. After meaningful "
+        "progress and before ending a work turn, rewrite the entire file (do not append) with a "
+        "compact current-state summary: objective, completed work, important findings/decisions, "
+        "files changed, validation/results, blockers, current repo/SHA state when relevant, and the "
+        "exact next step. Keep it under %d characters. This file is coordinator state outside the "
+        "Mounting Force repository; never add or commit it there."
+        % (handoff_path(task_id), MAX_HANDOFF_CHARS))
+
+
+def _fresh_chat_handoff_context(task_id):
+    value = read_handoff(task_id)
+    if not value:
+        return ""
+    return (
+        "PREVIOUS CHAT HANDOFF (worker-maintained; verify against current repository state before "
+        "relying on it):\n---\n%s\n---\nContinue from this state without redoing completed work unless verification shows it is stale."
+        % value)
+
+
 def run_git(arguments, check=True):
     command = ["git", "-C", REPO_PATH] + list(arguments)
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -236,13 +337,8 @@ def path_exists_at_ref(ref_name, repo_relative_path):
     return code == 0
 
 
-def list_open_tasks(ref_name=None):
-    """Return tasks whose authoritative queue folder is open on the queue ref.
-
-    Folder location is the state source of truth. If a task is accidentally present in
-    more than one queue folder, closed wins over pending, and pending wins over open, so
-    the coordinator never sends an agent back to work on a completed assignment.
-    """
+def queue_task_states(ref_name=None):
+    """Folder state is authoritative; closed wins duplicates, then review, then open."""
     ref_name = ref_name or QUEUE_REF
     unused_code, stdout, unused_stderr = run_git([
         "ls-tree", "-r", "--name-only", ref_name, "--",
@@ -255,18 +351,60 @@ def list_open_tasks(ref_name=None):
         if len(parts) != 4 or parts[0] != "SceneIssues" or \
                 parts[1] not in precedence or parts[3] != "issue.json":
             continue
-        task_id = parts[2]
-        folder = parts[1]
-        current = states.get(task_id)
-        if current is None or precedence[folder] > precedence[current]:
+        task_id, folder = parts[2], parts[1]
+        if precedence[folder] > precedence.get(states.get(task_id), 0):
             states[task_id] = folder
-    return sorted(task_id for task_id, folder in states.items() if folder == "open")
+    return states
+
+
+def list_open_tasks(ref_name=None):
+    return sorted(task for task, state in queue_task_states(ref_name).items() if state == "open")
+
+
+def list_available_tasks(ref_name=None):
+    states = queue_task_states(ref_name)
+    return sorted((task for task in states if states[task] in ("pending", "open")),
+                  key=lambda task: (states[task] != "pending", task))
+
+
+def task_role(task_id, ref_name=None):
+    return "reviewer" if queue_task_states(ref_name).get(task_id) == "pending" else "implementer"
+
+
+def task_issue_path(task_id, ref_name=None):
+    folder = "pending" if task_role(task_id, ref_name) == "reviewer" else "open"
+    return "SceneIssues/%s/%s/issue.json" % (folder, task_id)
+
+
+def unresolved_task_dependencies(task_id, ref_name=None):
+    """Return declared dependencies that are not closed on the authoritative queue ref."""
+    ref_name = ref_name or QUEUE_REF
+    issue = read_json_at_ref(ref_name, task_issue_path(task_id, ref_name))
+    if issue is None:
+        return []
+    dependencies = issue.get("dependsOn") or []
+    if not isinstance(dependencies, (list, tuple)):
+        dependencies = [dependencies]
+    unresolved = []
+    for dependency in dependencies:
+        dependency = _text(dependency or "").strip()
+        if not dependency:
+            continue
+        closed_path = "SceneIssues/closed/%s/issue.json" % dependency
+        if not path_exists_at_ref(ref_name, closed_path):
+            unresolved.append(dependency)
+    return sorted(set(unresolved))
+
+
+def task_is_eligible(task_id, ref_name=None):
+    """An open SceneIssue is assignable only after every declared dependency is closed."""
+    return not unresolved_task_dependencies(task_id, ref_name=ref_name)
 
 
 def scene_work_kind(task_id, ref_name=None):
     """Classify an assignment using explicit metadata or its published note prefix."""
     ref_name = ref_name or QUEUE_REF
-    path = "SceneIssues/open/%s/issue.json" % task_id
+    path = task_issue_path(task_id, ref_name)
     issue = read_json_at_ref(ref_name, path) or {}
     explicit = _text(issue.get("workType") or "").strip().lower()
     if explicit in (ISSUE_WORK_KIND, FEATURE_WORK_KIND):
@@ -335,13 +473,13 @@ def branch_introduced_issue_paths(branch_name):
     def manifests(ref):
         unused_code, stdout, unused_stderr = run_git([
             "ls-tree", "-r", "--name-only", ref, "--",
-            "SceneIssues/open", "SceneIssues/pending", "SceneIssues/closed",
+            "SceneIssues/open", "SceneIssues/closed",
         ])
         result = {}
         for path in stdout.splitlines():
             parts = path.split("/")
             if len(parts) == 4 and parts[0] == "SceneIssues" \
-                    and parts[1] in ("open", "pending", "closed") \
+                    and parts[1] in ("open", "closed") \
                     and parts[3] == "issue.json":
                 result[parts[2]] = path
         return result
@@ -367,7 +505,7 @@ def branch_policy_violations(task_id, branch_name):
             continue
         parts = path.split("/")
         if len(parts) >= 3 and parts[0] == "SceneIssues" \
-                and parts[1] in ("open", "pending", "closed") and parts[2] != task_id:
+                and parts[1] in ("open", "closed") and parts[2] != task_id:
             violations.append(path)
     return sorted(set(violations))
 
@@ -542,7 +680,7 @@ def targeted_ci_gate(ci_branch_name, fix_commit):
 
 
 def completion_issue_state(task_id, branch_name):
-    """Return verified pending or closed metadata from a remote feature branch."""
+    """Return verified closed metadata from a remote feature branch."""
     ref_name = remote_ref(branch_name)
     if not ref_exists(ref_name):
         return None
@@ -556,42 +694,32 @@ def completion_issue_state(task_id, branch_name):
         log("%s cannot complete because %s contains forbidden feature-only paths: %s" % (
             task_id, branch_name, ", ".join(violations)))
         return None
-    pending_path = "SceneIssues/pending/%s/issue.json" % task_id
     closed_path = "SceneIssues/closed/%s/issue.json" % task_id
-    pending_issue = read_json_at_ref(ref_name, pending_path)
-    closed_issue = read_json_at_ref(ref_name, closed_path)
-    issue = pending_issue or closed_issue
+    issue = read_json_at_ref(ref_name, closed_path)
     if issue is None:
         return None
-    open_issue_path = "SceneIssues/open/%s/issue.json" % task_id
-    if read_json_at_ref(ref_name, open_issue_path) is not None or \
-            (pending_issue is not None and closed_issue is not None):
-        log("%s must exist in exactly one completion folder on %s" % (
-            task_id, branch_name))
+    open_issue_path = task_issue_path(task_id, ref_name)
+    if read_json_at_ref(ref_name, open_issue_path) is not None:
+        log("%s must exist in exactly one queue folder on %s" % (task_id, branch_name))
         return None
     status = _text(issue.get("status") or "").lower()
-    expected_status = PENDING_STATUS if pending_issue is not None else "fixed"
-    if status != expected_status:
+    if status != "fixed":
         return None
 
     resolved = _text(issue.get("resolvedUtc") or "").strip()
-    if status == PENDING_STATUS and resolved:
-        log("%s on %s is pending but already has resolvedUtc" % (task_id, branch_name))
-        return None
-    if status == "fixed" and not resolved:
+    if not resolved:
         log("%s on %s is fixed but missing resolvedUtc" % (task_id, branch_name))
         return None
 
     summary = _text(issue.get("resolutionSummary") or "").strip()
     if not summary:
-        log("%s on %s says %s but has no resolutionSummary" % (
-            task_id, branch_name, status))
+        log("%s on %s says fixed but has no resolutionSummary" % (task_id, branch_name))
         return None
 
     required = ("regressionTest", "fixCommit")
     missing = [key for key in required if not _text(issue.get(key) or "").strip()]
     if missing:
-        log("%s on %s says pending but is missing %s" % (
+        log("%s on %s says fixed but is missing %s" % (
             task_id, branch_name, ", ".join(missing)))
         return None
     if not commit_is_on_branch(_text(issue["fixCommit"]).strip(), branch_name):
@@ -599,14 +727,10 @@ def completion_issue_state(task_id, branch_name):
             task_id, issue["fixCommit"], branch_name))
         return None
     return {
-        "status": status,
+        "status": "fixed",
         "branch_head": branch_head(branch_name),
         "fix_commit": _text(issue.get("fixCommit") or "").strip(),
     }
-
-
-# Compatibility alias for existing callers.
-pending_issue_state = completion_issue_state
 
 
 def closed_on_master(task_id, candidate):
@@ -623,8 +747,7 @@ def closed_issue_state_on_master(task_id):
     issue = read_json_at_ref(QUEUE_REF, closed_path)
     if issue is None or _text(issue.get("status") or "").lower() != "fixed":
         return None
-    if read_json_at_ref(QUEUE_REF, "SceneIssues/open/%s/issue.json" % task_id) is not None or \
-            read_json_at_ref(QUEUE_REF, "SceneIssues/pending/%s/issue.json" % task_id) is not None:
+    if read_json_at_ref(QUEUE_REF, "SceneIssues/open/%s/issue.json" % task_id) is not None:
         return None
     required = ("resolvedUtc", "resolutionSummary", "regressionTest", "fixCommit")
     if any(not _text(issue.get(key) or "").strip() for key in required):
@@ -658,8 +781,6 @@ def closed_queue_state_on_master(task_id):
         warnings.append("closed folder contains status=%s" % (status or "<missing>"))
     if path_exists_at_ref(QUEUE_REF, "SceneIssues/open/%s/issue.json" % task_id):
         warnings.append("duplicate manifest also exists under open")
-    if path_exists_at_ref(QUEUE_REF, "SceneIssues/pending/%s/issue.json" % task_id):
-        warnings.append("duplicate manifest also exists under pending")
 
     required = ("resolvedUtc", "resolutionSummary", "regressionTest", "fixCommit")
     missing = [key for key in required if not _text(issue.get(key) or "").strip()]
@@ -692,6 +813,8 @@ def get_agent_task(agent_name, registry):
 
 def _assign(task_id, agent_name, branch_name, ci_branch_name, registry, now):
     previous = registry["tasks"].get(task_id) or {}
+    if not previous or previous.get("status") != "in_progress":
+        remove_handoff(task_id)
     history = list(previous.get("lease_history") or [])
     if previous.get("owner") and previous.get("owner") != agent_name:
         history.append({
@@ -707,6 +830,7 @@ def _assign(task_id, agent_name, branch_name, ci_branch_name, registry, now):
         "branch": branch_name,
         "ci_branch": ci_branch_name,
         "work_kind": scene_work_kind(task_id),
+        "role": task_role(task_id),
         "claimed_at": now,
         "last_heartbeat": now,
         "last_prompted": 0,
@@ -719,24 +843,26 @@ def claim_new_task(agent_name, branch_name, ci_branch_name, registry, open_tasks
     if get_agent_task(agent_name, registry):
         return get_agent_task(agent_name, registry)
     now = time.time() if now is None else now
-    for task_id in sorted(open_tasks):
+    for task_id in sorted(open_tasks, key=lambda task: (task_role(task) != "reviewer", task)):
+        role = task_role(task_id)
+        unresolved = unresolved_task_dependencies(task_id) if role == "implementer" else []
+        if unresolved:
+            log("skipping dependency-blocked task %s; waiting for: %s" % (
+                task_id, ", ".join(unresolved)))
+            continue
         info = registry["tasks"].get(task_id)
         if info is None or info.get("status") != "in_progress":
             if info is not None:
-                log("reopening %s because it is present in the authoritative open queue" %
+                log("reopening %s because it is present in the authoritative work queue" %
                     task_id)
             _assign(task_id, agent_name, branch_name, ci_branch_name, registry, now)
             return task_id
         if info.get("status") == "in_progress":
             heartbeat_at = float(info.get("last_heartbeat") or 0)
             if now - heartbeat_at > STALE_SECONDS:
-                previous_branch = info.get("branch")
-                if previous_branch and branch_has_unmerged_work(previous_branch):
-                    info["handoff_required"] = True
-                    info["handoff_reason"] = "stale owner has branch-only work"
-                    log("not reclaiming stale task %s from %s; %s has unmerged work" % (
-                        task_id, info.get("owner"), previous_branch))
-                    continue
+                # Legacy implementation branches are no longer authoritative. A stale lease is
+                # reclaimed based on coordinator ownership/heartbeat; valid work is preserved via
+                # the SceneIssue worktree and handoff, not by blocking on fixes/agent-N refs.
                 log("reclaiming stale task %s from %s" % (task_id, info.get("owner")))
                 _assign(task_id, agent_name, branch_name, ci_branch_name, registry, now)
                 return task_id
@@ -887,6 +1013,7 @@ def mark_terminal(task_id, registry, terminal, now=None):
     info = registry["tasks"].get(task_id)
     if not info:
         return
+    remove_handoff(task_id)
     info["status"] = terminal["status"]
     info["completed_at"] = time.time() if now is None else now
     info["completion_commit"] = terminal.get("branch_head")
@@ -902,6 +1029,21 @@ def reconcile_assignments(registry, now=None):
             changed = True
     for task_id, info in list(registry["tasks"].items()):
         if info.get("status") != "in_progress":
+            continue
+        role = task_role(task_id)
+        if info.get("role", "implementer") != role and queue_task_states().get(task_id) != "closed":
+            info["status"] = "phase_complete"
+            remove_handoff(task_id)
+            changed = True
+            continue
+        unresolved = unresolved_task_dependencies(task_id) if role == "implementer" else []
+        if unresolved:
+            info["status"] = "blocked_dependency"
+            info["blocked_dependencies"] = unresolved
+            info.pop("completion_gate", None)
+            log("releasing dependency-blocked assignment %s from %s; waiting for: %s" % (
+                task_id, info.get("owner"), ", ".join(unresolved)))
+            changed = True
             continue
         terminal = closed_issue_state_on_master(task_id)
         if terminal is None:
@@ -936,7 +1078,7 @@ def reconcile_assignments(registry, now=None):
             if info.get("completion_gate") != gate:
                 info["completion_gate"] = gate
                 changed = True
-            log("%s is pending on %s but targeted CI gate on %s is %s" % (
+            log("%s is closed on %s but targeted CI gate on %s is %s" % (
                 task_id, branch_name, ci_branch_name or "<missing>", gate["state"]))
             continue
 
@@ -948,8 +1090,7 @@ def reconcile_assignments(registry, now=None):
             changed = True
             continue
         gate = {
-            "state": "close_and_merge" if candidate["status"] == PENDING_STATUS
-                     else "merge_to_master",
+            "state": "merge_to_master",
             "fix_commit": candidate.get("fix_commit"),
             "completion_commit": candidate.get("branch_head"),
         }
@@ -963,6 +1104,54 @@ def reconcile_assignments(registry, now=None):
 
 
 # ---------------- UI HELPERS ----------------
+
+def _command_text(arguments):
+    """Return compact command output for UI diagnostics without failing the coordinator."""
+    try:
+        process = subprocess.Popen(arguments, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout, stderr = process.communicate()
+        value = _decode(stdout or stderr or b"").strip()
+        return value or "<empty>"
+    except Exception as error:
+        return "<error: %s>" % error
+
+
+def frontmost_app_name():
+    return _command_text([
+        "osascript", "-e",
+        'tell application "System Events" to get name of first application process whose frontmost is true'
+    ])
+
+
+def chrome_window_title():
+    return _command_text([
+        "osascript", "-e", 'tell application "Google Chrome" to get name of front window'
+    ])
+
+def chrome_tab_debug():
+    return _command_text([
+        "osascript", "-e",
+        'tell application "Google Chrome" to tell front window to return (active tab index as text) & "|" & (URL of active tab) & "|" & (title of active tab)'
+    ])
+
+def chrome_window_bounds():
+    return _command_text([
+        "osascript", "-e", 'tell application "Google Chrome" to get bounds of front window'
+    ])
+
+
+def activate_browser():
+    """Bring the browser to the foreground before sending tab-selection shortcuts."""
+    before = frontmost_app_name()
+    log("browser activation: before=%s chrome_window=%s" % (before, chrome_window_title()))
+    try:
+        code = subprocess.call(["open", "-a", BROWSER_APP])
+        log("browser activation: open exit=%s" % code)
+        return code == 0
+    except Exception as error:
+        log("could not activate %s: %s" % (BROWSER_APP, error))
+        return False
+
 
 def configure_ui():
     settings = globals().get("Settings")
@@ -980,6 +1169,10 @@ def switch_to_tab(number):
     Passing the modifier with the number makes press/type/release one Sikuli action.
     Explicit keyUp calls clean up any modifier left behind by an interrupted action.
     """
+    activated = activate_browser()
+    globals()["wait"](0.50)
+    log("tab %d: browser activation complete; activated=%s frontmost=%s chrome_window=%s bounds=%s tab=%s" % (
+        number, activated, frontmost_app_name(), chrome_window_title(), chrome_window_bounds(), chrome_tab_debug()))
     type_value = globals()["type"]
     key = globals()["Key"]
 
@@ -997,8 +1190,10 @@ def switch_to_tab(number):
             pass
 
     globals()["wait"](TAB_SETTLE_SECONDS)
+    log("tab %d: shortcut sent; frontmost=%s chrome_window=%s bounds=%s tab=%s" % (
+        number, frontmost_app_name(), chrome_window_title(), chrome_window_bounds(), chrome_tab_debug()))
     type_value(key.END)
-    globals()["wait"](1)
+    globals()["wait"](0.10)
 
 
 def refresh_tab_page():
@@ -1067,7 +1262,11 @@ def capture_ui_diagnostic(label):
 
 def image_exists(filename, timeout=None):
     timeout = IMAGE_TIMEOUT_SECONDS if timeout is None else timeout
-    return globals()["exists"](os.path.join(SCRIPT_DIR, filename), timeout)
+    path = os.path.join(SCRIPT_DIR, filename)
+    log("image probe: looking for %s timeout=%.2fs" % (filename, float(timeout)))
+    match = globals()["exists"](path, timeout)
+    log("image probe: %s %s" % (filename, "FOUND" if match else "NOT FOUND"))
+    return match
 
 
 def click_image(filename, timeout=None):
@@ -1080,8 +1279,8 @@ def click_image(filename, timeout=None):
 
 def recover_long_conversation(agent_name, registry):
     """Start a fresh chat when the conversation-length action is visible."""
-    if not image_exists("new_chat.png", UI_STATE_TIMEOUT_SECONDS) or \
-            not click_image("new_chat.png", UI_STATE_TIMEOUT_SECONDS):
+    if not image_exists("new_chat.png", FAST_UI_PROBE_SECONDS) or \
+            not click_image("new_chat.png", 1):
         return False
     globals()["wait"](2)
     task_id = get_agent_task(agent_name, registry)
@@ -1101,11 +1300,11 @@ def recover_long_conversation(agent_name, registry):
 def branch_cleanup_prompt(number, head=None):
     name = agent_id(number)
     branch_name = feature_branch(number)
-    return """You are {name}. Do not start another SceneIssue yet. `{branch}` still has work that is not on current `origin/master`{head_text}. Finish and reconcile that existing work now.
+    return """You are {name}. Do not start another SceneIssue yet. `{branch}` still has work that is not on current `origin/main`{head_text}. Finish and reconcile that existing work now.
 
-Fetch origin and inspect the branch-only commits/diff against current `origin/master`. Identify what belongs to your prior assignment. Preserve and integrate valid task-specific work, but do not blindly merge stale branch history, reopen an already closed SceneIssue just to clear the branch, overwrite newer master work, or discard unique valid work. Complete any remaining implementation, validation, bookkeeping, and required exact-SHA CI for valid retained work.
+Fetch origin and inspect the branch-only commits/diff against current `origin/main`. Identify what belongs to your prior assignment. Preserve and integrate valid task-specific work, but do not blindly merge stale branch history, reopen an already closed SceneIssue just to clear the branch, overwrite newer master work, or discard unique valid work. Complete any remaining implementation, validation, bookkeeping, and required exact-SHA CI for valid retained work.
 
-If useful work remains, reconcile/rebuild that valid delta on top of current `origin/master`, then push the verified reconciled head to `origin/master` non-force. After all intended work is safely on master, make `{branch}` point at the current `origin/master` head; force-with-lease is allowed only for this feature branch if needed to discard obsolete branch history. Never force-push `origin/master`. Keep working until `{branch}` has no commits outside `origin/master`, then stop and let the coordinator assign new work.""".format(
+If useful work remains, reconcile/rebuild that valid delta on top of current `origin/main`, but do not publish incomplete feature work to main. Complete the entire prior SceneIssue and all required validation first. Only then push the verified reconciled head to `origin/main` non-force. After all intended work is safely on main, make `{branch}` point at the current `origin/main` head; force-with-lease is allowed only for this legacy feature branch if needed to discard obsolete branch history. Never force-push `origin/main`. Keep working until `{branch}` has no commits outside `origin/main`, then stop and let the coordinator assign new work.""".format(
         name=name,
         branch=branch_name,
         head_text=(" at `%s`" % head) if head else "",
@@ -1145,19 +1344,19 @@ def task_prompt(number, task_id, work_kind=None):
     ci_branch_name = ci_branch(number)
     work_kind = work_kind or scene_work_kind(task_id)
     if work_kind == FEATURE_WORK_KIND:
-        directions = ("Follow `SceneIssues/feature-readme.md`. Before implementation, create and "
+        directions = ("Follow `SceneIssues/README.md`. Before implementation, create and "
                       "maintain separate `plan.md` and `tasks.md` files in the assigned folder. "
                       "Add discovered required work to `tasks.md`; do not close the feature until "
                       "every checkbox and acceptance criterion is complete and validated.")
     else:
-        directions = ("Follow `SceneIssues/issue-readme.md`. Inspect every capture and marked "
+        directions = ("Follow `SceneIssues/README.md`. Inspect every capture and marked "
                       "region, discriminate competing hypotheses with runtime evidence, add a "
                       "behavioral regression, and validate the exact scene in the built application.")
-    return """You are {name}. Work only on the {work_kind} assignment `SceneIssues/open/{task_id}` on `{branch}`; use `{ci_branch}` only for its final targeted-CI request. Fetch origin and resume the feature branch, or create it from current `origin/master`.
+    return """You are {name}. Work only on the {work_kind} assignment `SceneIssues/open/{task_id}` on `{branch}`; use `{ci_branch}` only for its final targeted-CI request. Fetch origin and resume the feature branch, or create it from current `origin/main`.
 
 Follow `AGENTS.md`. {directions} Check blast radius and cost.
 
-After every workflow gate and green exact-SHA CI, complete pending metadata on `{branch}`. Then move `SceneIssues/pending/{task_id}` to `SceneIssues/closed/{task_id}`, set status=`fixed` and `resolvedUtc`, merge current `origin/master` into `{branch}`, and push that exact branch head to `origin/master` non-force. If master advanced, fetch, merge, and retry. Do not modify another assignment, edit `.github/test-request.json` on the feature branch, create extra CI transports, replace queued CI, or self-select more work.""".format(
+Never publish partial feature work to `origin/main`. Keep the assignment isolated until the entire SceneIssue is complete, every required checkbox/acceptance criterion is satisfied, and all required exact-SHA tests/gates are green. Only then reconcile from current `origin/main`; if that changes the candidate rerun affected validation, then perform the single final non-force promotion to `origin/main`. Do not modify another assignment, edit `.github/test-request.json` on the feature branch, create extra CI transports, replace queued CI, or self-select more work.""".format(
         name=name,
         task_id=task_id,
         branch=branch_name,
@@ -1176,17 +1375,17 @@ def continuation_prompt(number, task_id, info=None):
     ci_head = gate.get("ci_head") or "<missing>"
     fix_commit = gate.get("fix_commit") or "<missing>"
 
-    if state in ("close_and_merge", "merge_to_master"):
+    if state == "merge_to_master":
         feature_gate = ("First confirm every `tasks.md` checkbox and every acceptance criterion "
-                        "is complete; if any is unfinished, keep the feature open or pending and "
-                        "continue the work. " if work_kind == FEATURE_WORK_KIND else "")
-        close = ("Move `SceneIssues/pending/%s` to `SceneIssues/closed/%s`, set status=`fixed` "
-                 "and `resolvedUtc`, and commit that bookkeeping. " % (task_id, task_id)) \
-            if state == "close_and_merge" else "The assignment is already closed on your branch. "
-        return ("%s is verified. %s%sFetch current `origin/master`, merge it into `%s`, resolve "
-                "only in-scope conflicts, push the feature branch, then push its exact head to "
-                "`origin/master` non-force. If master advanced, fetch, merge, and retry; do not "
-                "wait for the coordinator." % (
+                        "is complete; if any is unfinished, keep the feature open and continue "
+                        "the work. " if work_kind == FEATURE_WORK_KIND else "")
+        close = "The assignment is already closed on your branch. "
+        return ("%s is verified. %s%sConfirm the entire SceneIssue and all required tests/gates are "
+                "complete before publication. Fetch current `origin/main` and reconcile it into `%s`, "
+                "resolve only in-scope conflicts, rerun affected validation if reconciliation changed "
+                "the candidate, then perform the single final non-force promotion of its exact head "
+                "to `origin/main`. If main advanced, reconcile, revalidate affected work, and retry; "
+                "do not wait for the coordinator." % (
                     task_id, feature_gate, close, feature_branch(number)))
 
     if state == "missing_branch":
@@ -1212,21 +1411,40 @@ def continuation_prompt(number, task_id, info=None):
                     task_id, ci_branch_name, ci_head, state))
     checklist = (" Keep `plan.md` and `tasks.md` separate and current; do not close with any "
                  "unchecked task." if work_kind == FEATURE_WORK_KIND else "")
-    return ("Continue only the %s assignment `SceneIssues/open/%s` on `%s`; follow `%s`.%s Once "
-            "verified, close the assignment and merge your branch to master." % (
+    return ("Continue only the %s assignment `SceneIssues/open/%s` on `%s`; follow `%s`.%s Keep "
+            "all partial work isolated from main. Only after the entire SceneIssue is complete and "
+            "all required tests/gates are green may you perform its final promotion to main." % (
                 work_kind, task_id, feature_branch(number), guide, checklist))
 
 
 def message_for_nudge(number, task_id, info, started_new_chat=False):
     """Choose enough context for a normal nudge or a freshly restarted chat."""
+    activity = info.get("ci_activity") or {}
+    active_states = ("queued", "in_progress", "waiting", "requested", "pending")
+
+    if started_new_chat:
+        parts = [task_prompt(number, task_id, info.get("work_kind"))]
+        if info.get("completion_gate"):
+            parts.append("CURRENT COORDINATOR STATE:\n%s" %
+                         continuation_prompt(number, task_id, info))
+        elif activity.get("state") in active_states:
+            parts.append(
+                "CURRENT COORDINATOR STATE:\nContinue only scene assignment %s. Its exact "
+                "targeted-CI request `%s` is `%s`; monitor it without replacing it, then close "
+                "and merge the assignment yourself." % (
+                    task_id, activity.get("ci_head") or "<unknown>", activity.get("state")))
+        handoff = _fresh_chat_handoff_context(task_id)
+        if handoff:
+            parts.append(handoff)
+        return "\n\n".join(parts)
+
     if info.get("completion_gate"):
         return continuation_prompt(number, task_id, info)
-    activity = info.get("ci_activity") or {}
-    if activity.get("state") in ("queued", "in_progress", "waiting", "requested", "pending"):
+    if activity.get("state") in active_states:
         return ("Continue only scene assignment %s. Its exact targeted-CI request `%s` is `%s`; "
                 "monitor it without replacing it, then close and merge the assignment yourself." % (
                     task_id, activity.get("ci_head") or "<unknown>", activity.get("state")))
-    if started_new_chat or not float(info.get("last_prompted") or 0):
+    if not float(info.get("last_prompted") or 0):
         return task_prompt(number, task_id, info.get("work_kind"))
     return continuation_prompt(number, task_id, info)
 
@@ -1238,7 +1456,7 @@ def focus_textbox():
         globals()["click"](match)
         return True
 
-    submit = image_exists("submit.png", UI_STATE_TIMEOUT_SECONDS)
+    submit = image_exists("submit.png", FAST_UI_PROBE_SECONDS)
     if not submit:
         return False
     try:
@@ -1252,9 +1470,19 @@ def focus_textbox():
 
 def composer_visible():
     """Recognize both the empty placeholder and a non-empty, submittable draft."""
-    if image_exists("textbox.png", UI_STATE_TIMEOUT_SECONDS):
+    log("composer probe: frontmost=%s chrome_window=%s bounds=%s tab=%s" % (
+        frontmost_app_name(), chrome_window_title(), chrome_window_bounds(), chrome_tab_debug()))
+    textbox = image_exists("textbox.png", FAST_UI_PROBE_SECONDS)
+    log("composer probe: textbox.png=%s" % bool(textbox))
+    if textbox:
         return True
-    return bool(image_exists("submit.png", UI_STATE_TIMEOUT_SECONDS))
+    submit = image_exists("submit.png", FAST_UI_PROBE_SECONDS)
+    log("composer probe: submit.png=%s" % bool(submit))
+    if submit:
+        return True
+    capture_ui_diagnostic("composer-not-visible")
+    log("composer probe: no match; diagnostic screenshot captured")
+    return False
 
 
 def replace_composer_text(text):
@@ -1338,13 +1566,17 @@ def validate_configuration():
     problems = []
     if not os.path.isdir(REPO_PATH):
         problems.append("repository does not exist: %s" % REPO_PATH)
-    if not os.path.isdir(SCENE_ISSUES_PATH):
-        problems.append("SceneIssues directory does not exist: %s" % SCENE_ISSUES_PATH)
-    if not os.path.isdir(OPEN_SCENE_ISSUES_PATH):
-        problems.append("open SceneIssues queue does not exist: %s" % OPEN_SCENE_ISSUES_PATH)
-    if not os.path.isdir(PENDING_SCENE_ISSUES_PATH):
-        problems.append("pending SceneIssues queue does not exist: %s" %
-                        PENDING_SCENE_ISSUES_PATH)
+    else:
+        try:
+            fetch_remote()
+            if not path_exists_at_ref(QUEUE_REF, "SceneIssues/open/.gitkeep"):
+                problems.append("open SceneIssues queue does not exist on %s" % QUEUE_REF)
+            if not path_exists_at_ref(QUEUE_REF, "SceneIssues/pending/.gitkeep"):
+                problems.append("pending SceneIssues queue does not exist on %s" % QUEUE_REF)
+            if not path_exists_at_ref(QUEUE_REF, "SceneIssues/closed/.gitkeep"):
+                problems.append("closed SceneIssues queue does not exist on %s" % QUEUE_REF)
+        except Exception as error:
+            problems.append("cannot read SceneIssues queue from %s: %s" % (QUEUE_REF, error))
     for image in ("textbox.png", "submit.png", RUNNING_IMAGE, "new_chat.png",
                   "got_it.png", "connection_lost.png", "refresh.png"):
         path = os.path.join(SCRIPT_DIR, image)
@@ -1363,23 +1595,28 @@ def sync_remote_and_registry(registry):
         changed = True
     if changed:
         save_registry(registry)
-    return list_open_tasks()
+    return list_available_tasks()
 
 
 def handle_tab(number, registry, open_tasks):
     name = agent_id(number)
+    log("%s: switching to browser tab %d" % (name, number))
     switch_to_tab(number)
+    log("%s: tab selected; checking conversation-limit state" % name)
     started_new_chat = recover_long_conversation(name, registry)
     task_id = get_agent_task(name, registry)
+    log("%s: conversation-limit check complete; task=%s; checking connection state" % (
+        name, task_id or "<none>"))
 
-    if image_exists("connection_lost.png", UI_STATE_TIMEOUT_SECONDS):
+    if image_exists("connection_lost.png", FAST_UI_PROBE_SECONDS):
         log("%s has a connection interruption; refreshing" % name)
         click_image("refresh.png", 2)
         globals()["wait"](2)
         mark_tab_refresh(number, registry)
         return
-    if image_exists("got_it.png", UI_STATE_TIMEOUT_SECONDS) and \
-            click_image("got_it.png", UI_STATE_TIMEOUT_SECONDS):
+    log("%s: connection check complete; checking restored-draft dialog" % name)
+    if image_exists("got_it.png", FAST_UI_PROBE_SECONDS) and \
+            click_image("got_it.png", 1):
         park_mouse()
         globals()["wait"](TAB_SETTLE_SECONDS)
         capture_ui_diagnostic("got-it-dismissed-agent-%d" % number)
@@ -1412,14 +1649,19 @@ def handle_tab(number, registry, open_tasks):
                 log("%s post-Got-it submission failed after the settled-state retry" % name)
             return
 
-    busy = bool(image_exists(RUNNING_IMAGE, UI_STATE_TIMEOUT_SECONDS))
+    log("%s: restored-draft check complete; checking running state" % name)
+    busy = bool(image_exists(RUNNING_IMAGE, FAST_UI_PROBE_SECONDS))
+    log("%s: running-state check complete; busy=%s" % (name, busy))
 
+    log("%s: checking refresh policy" % name)
     if tab_needs_refresh(number, registry, busy=busy):
         reason = "been continuously busy" if busy else "had no typing or submission"
         log("%s has %s for 20 minutes; refreshing the page" % (name, reason))
         refresh_tab_page()
         mark_tab_refresh(number, registry)
         return
+
+    log("%s: refresh-policy check complete" % name)
 
     if busy:
         if task_id:
@@ -1428,40 +1670,34 @@ def handle_tab(number, registry, open_tasks):
         return
 
     if not task_id:
-        branch_name = feature_branch(number)
-        head = branch_head(branch_name)
-        if head and branch_has_unmerged_work(branch_name):
-            if should_prompt_branch_cleanup(registry, name, branch_name, head):
-                if send_tab_message(number, registry, branch_cleanup_prompt(number, head)):
-                    mark_branch_cleanup_prompted(registry, name, branch_name, head)
-                    save_registry(registry)
-                    log("directed %s to finish unmerged work on %s at %s" % (
-                        name, branch_name, head))
-                else:
-                    log("%s has unmerged work on %s but its textbox was not visible; will retry" % (
-                        name, branch_name))
-            return
+        # SceneIssue implementation lives in its own detached worktree based on origin/main.
+        # Legacy fixes/agent-N and ci-test/fixes/agent-N refs must not block a new assignment.
         if clear_branch_cleanup(registry, name):
             save_registry(registry)
-            log("%s cleanup is complete; %s is now fully represented on master" % (
-                name, branch_name))
-        task_id = claim_new_task(
-            name, feature_branch(number), ci_branch(number), registry, open_tasks)
+        log("%s: selecting a task from %d review/open task(s)" % (name, len(open_tasks)))
+        task_id = claim_new_task(name, None, None, registry, open_tasks)
+        log("%s: task selection complete; task=%s" % (name, task_id or "<none>"))
         if not task_id:
             return
         mark_prompt_attempted(task_id, registry)
+        log("%s: persisting claim for %s" % (name, task_id))
         save_registry(registry)
+        log("%s: claim persistence complete for %s" % (name, task_id))
+        if get_agent_task(name, registry) != task_id:
+            return
         if send_tab_message(number, registry, task_prompt(number, task_id)):
             heartbeat(task_id, registry)
             mark_prompted(task_id, registry)
             mark_response_active(task_id, registry)
             save_registry(registry)
-            log("%s claimed %s on %s" % (name, task_id, feature_branch(number)))
+            log("%s claimed %s in its SceneIssue worktree" % (name, task_id))
         else:
             log("%s claimed %s but its textbox was not visible; will retry" % (name, task_id))
         return
 
+    log("%s: checking composer visibility" % name)
     textbox_visible = composer_visible()
+    log("%s: composer check complete; visible=%s" % (name, textbox_visible))
     if textbox_visible:
         heartbeat(task_id, registry)
     info = registry["tasks"][task_id]
@@ -1520,10 +1756,10 @@ def coordinator_loop():
 def check_only():
     validate_configuration()
     fetch_remote()
-    tasks = list_open_tasks()
+    tasks = list_available_tasks()
     registry = load_registry()
     reconcile_assignments(registry)
-    log("configuration is valid; %d open remote task(s): %s" % (
+    log("configuration is valid; %d available remote task(s): %s" % (
         len(tasks), ", ".join(tasks) if tasks else "none"))
 
 

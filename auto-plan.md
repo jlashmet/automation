@@ -2,26 +2,27 @@
 
 ## Goal
 
-Coordinate multiple remote agents against `jlashmet/mounting-force-2`, assign one SceneIssue at a time, and keep ownership/state durable while agents perform implementation directly on the repository's shared `master` branch.
+Coordinate multiple remote agents against the Mounting Force repository, assign one SceneIssue at a time, and keep ownership/state durable while agents implement in isolated SceneIssue worktrees and publish only complete, tested features to the shared branch.
 
 ## Current execution policy
 
-The previous per-agent branch model has been retired.
+The previous shared-master implementation model has been retired. Agents work in isolated SceneIssue worktrees based on the current shared branch.
 
 Agents must now:
 
 - use the **Chat on Steroids** plugin for all code and repository interaction, including reading/editing files, running commands, and running tests;
-- work directly on `master` rather than on `fixes/agent-N`, feature branches, CI branches, transport branches, or other agent-specific development branches;
-- pull/reconcile the latest `origin/master` before beginning work;
-- **periodically pull from `origin/master` while working** so concurrent agent changes are incorporated promptly;
+- work only in the assigned SceneIssue worktree rather than directly in the primary checkout or on persistent agent development branches;
+- fetch/reconcile the latest upstream shared branch before beginning work;
+- **periodically reconcile from upstream while working** so concurrent agent changes are incorporated promptly, without publishing the incomplete feature upstream;
 - resolve conflicts carefully, preserving valid work from both sides rather than overwriting another agent's changes;
 - keep changes scoped to the assigned SceneIssue;
 - run the relevant tests through Chat on Steroids and resolve failures attributable to their work;
 - keep blocked or incomplete work under `SceneIssues/open/`;
 - move work to `SceneIssues/closed/` only when the acceptance criteria and required tasks are genuinely complete;
-- pull/reconcile `origin/master` again immediately before final commit/push, resolve conflicts, and rerun affected tests if reconciliation changes code;
-- commit completed work directly on `master` and push it to `origin/master` non-force;
-- reconcile and retry if `origin/master` advances before the push.
+- never publish partial feature work to the shared branch after an individual task, milestone, checkpoint, or partial green test run;
+- only when the whole SceneIssue is complete, every required acceptance criterion is satisfied, all required tests/gates are green, and final self-review is complete, reconcile upstream one final time;
+- rerun affected tests if that final reconciliation changes code, then perform the single final non-force promotion to the shared branch;
+- reconcile, revalidate affected work, and retry if the shared branch advances before that final promotion.
 
 The coordinator may continue to use `automation/assignments` as a durable ownership/state branch. That branch is coordinator metadata only and is not a development branch for agents.
 
@@ -33,7 +34,7 @@ The coordinator may continue to use `automation/assignments` as a durable owners
 - `blocked` is not closed. Blocked captures remain in `open/` until their required acceptance work is complete.
 - Agents do not self-select additional SceneIssues; the coordinator assigns the next task.
 - Browser-image failures and transient Git/network failures must not crash the coordinator or incorrectly release work.
-- Shared-master concurrency requires agents to preserve unrelated valid changes and reconcile current `origin/master` periodically while working and before pushing.
+- Concurrent work requires agents to preserve unrelated valid changes and reconcile from upstream periodically while working, while keeping incomplete feature work isolated until final validated promotion.
 
 ## Acceptance criteria
 
@@ -44,9 +45,9 @@ The coordinator may continue to use `automation/assignments` as a durable owners
 - [x] Re-brief idle/reset conversations from persisted assignment state.
 - [x] Use `SceneIssues/open/` for incomplete work and `SceneIssues/closed/` for completed work.
 - [x] Require agents to use Chat on Steroids for code/files/commands/tests.
-- [x] Require direct development on `master` with no per-agent development branches.
-- [x] Require agents to periodically pull/reconcile `origin/master` and resolve conflicts while working.
-- [x] Require completed work to be committed on `master` and pushed non-force to `origin/master`.
+- [x] Require isolated SceneIssue worktrees with no persistent per-agent implementation branches.
+- [x] Require agents to periodically fetch/reconcile from upstream and resolve conflicts while working without publishing partial work.
+- [x] Require promotion to the shared branch only after the entire SceneIssue is complete, tested, gated and self-reviewed.
 - [x] Validate coordinator logic locally without sending messages to live browser tabs.
 
 ## Tasks
@@ -55,8 +56,8 @@ The coordinator may continue to use `automation/assignments` as a durable owners
 - [x] Implement the coordinator and durable assignment state.
 - [x] Implement the `open/` / `closed/` queue layout.
 - [x] Add automated tests for claiming and stale recovery.
-- [x] Replace the old per-agent branch directions with the Chat on Steroids + shared-master workflow.
-- [x] Add periodic `origin/master` reconciliation/conflict-resolution instructions.
+- [x] Replace the old per-agent/shared-master directions with the Chat on Steroids + isolated-worktree workflow.
+- [x] Add periodic upstream reconciliation/conflict-resolution instructions that explicitly prohibit intermediate publication.
 - [x] Update prompt-policy tests to lock in the new workflow.
 
 ## Historical note

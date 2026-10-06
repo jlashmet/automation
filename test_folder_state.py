@@ -40,13 +40,11 @@ class FolderStateTests(unittest.TestCase):
         self.git("add", ".")
         self.git("commit", "-qm", "queue state")
         head = self.git("rev-parse", "HEAD").strip()
-        self.git("update-ref", "refs/remotes/origin/master", head)
+        self.git("update-ref", "refs/remotes/origin/main", head)
         return head
 
     def test_open_queue_uses_folder_not_status_and_closed_wins_duplicates(self):
         self.write_issue("open", "open-stale-status", {"status": "fixed"})
-        self.write_issue("open", "pending-duplicate", {"status": "open"})
-        self.write_issue("pending", "pending-duplicate", {"status": "fixed"})
         self.write_issue("open", "closed-duplicate", {"status": "open"})
         self.write_issue("closed", "closed-duplicate", {"status": "open"})
         self.publish_master()
@@ -59,6 +57,7 @@ class FolderStateTests(unittest.TestCase):
         registry = {"version": 1, "tasks": {"capture": {
             "status": "in_progress",
             "owner": "agent-3",
+            "role": "reviewer",
             "branch": "fixes/agent-3",
             "ci_branch": "ci-test/fixes/agent-3",
         }}}
@@ -73,6 +72,39 @@ class FolderStateTests(unittest.TestCase):
         self.assertIsNone(auto.get_agent_task("agent-3", registry))
         self.assertIn("closed folder contains status=open",
                       info["completion_audit_warnings"])
+
+    def test_reviews_precede_open_work_and_closed_wins_duplicates(self):
+        self.write_issue("open", "aaa-implementation", {"status": "open"})
+        self.write_issue("open", "zzz-review", {"status": "open"})
+        self.write_issue("pending", "zzz-review", {"status": "pending"})
+        self.write_issue("pending", "done", {})
+        self.write_issue("closed", "done", {})
+        self.publish_master()
+        self.assertEqual(["zzz-review", "aaa-implementation"], auto.list_available_tasks())
+        registry = {"tasks": {}}
+        claimed = auto.claim_new_task("agent-1", None, None, registry,
+                                      ["aaa-implementation", "zzz-review"], now=100)
+        self.assertEqual("zzz-review", claimed)
+        self.assertEqual("reviewer", registry["tasks"][claimed]["role"])
+        prompt = auto.task_prompt(1, claimed)
+        recovered = auto.message_for_nudge(1, claimed, registry["tasks"][claimed], True)
+        self.assertIn("the reviewer", recovered)
+        self.assertIn("review.md", prompt)
+        self.assertIn("SceneIssues/closed/zzz-review", prompt)
+        self.assertIn("SceneIssues/open/zzz-review", prompt)
+
+    def test_phase_changes_release_previous_assignment(self):
+        for folder, previous_role in (("pending", "implementer"), ("open", "reviewer")):
+            task = "transition-" + folder
+            self.write_issue(folder, task, {})
+            self.publish_master()
+            registry = {"tasks": {task: {"owner": "agent-1", "status": "in_progress",
+                                          "role": previous_role}}}
+            self.assertTrue(auto.reconcile_assignments(registry, now=100))
+            self.assertIsNone(auto.get_agent_task("agent-1", registry))
+            self.assertEqual(task, auto.claim_new_task("agent-1", None, None,
+                                                     registry, [task], now=101))
+            self.assertNotEqual(previous_role, registry["tasks"][task]["role"])
 
 
 if __name__ == "__main__":

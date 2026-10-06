@@ -16,6 +16,12 @@ SPEC.loader.exec_module(auto)
 
 
 class RegistryTests(unittest.TestCase):
+    def test_normal_continue_nudge_interval_is_thirty_seconds(self):
+        info = {"prompt_count": 1, "last_prompted": 100, "prompt_confirmed": True}
+        self.assertEqual(30, auto.nudge_interval(info))
+        self.assertFalse(auto.should_nudge(info, now=129))
+        self.assertTrue(auto.should_nudge(info, now=130))
+
     def test_text_helper_preserves_non_ascii_metadata(self):
         self.assertEqual(u"frame · budget", auto._text(u"frame · budget"))
 
@@ -49,12 +55,26 @@ class RegistryTests(unittest.TestCase):
 
         self.assertTrue(recovered)
         self.assertEqual([
-            ("new_chat.png", auto.UI_STATE_TIMEOUT_SECONDS),
+            ("new_chat.png", 1),
             ("wait", 2),
         ], events)
         self.assertEqual(0, registry["tasks"]["capture"]["last_prompted"])
         self.assertEqual(0, registry["tasks"]["capture"]["prompt_count"])
         self.assertFalse(registry["tasks"]["capture"]["prompt_confirmed"])
+
+    def test_restarted_coordinator_sends_full_assignment_before_continue(self):
+        fresh_session = auto.message_for_nudge(2, "capture", {
+            "last_prompted": 0,
+            "work_kind": auto.ISSUE_WORK_KIND,
+        }, started_new_chat=False)
+        established = auto.message_for_nudge(2, "capture", {
+            "last_prompted": 123,
+            "work_kind": auto.ISSUE_WORK_KIND,
+        }, started_new_chat=False)
+
+        self.assertIn("SceneIssues/open/capture", fresh_session)
+        self.assertIn("assigned `.worktrees/<SceneIssue-directory-name>` checkout", fresh_session)
+        self.assertEqual("continue", established)
 
     def test_new_chat_gets_assignment_or_current_gate_context(self):
         active = auto.message_for_nudge(2, "capture", {
@@ -72,10 +92,86 @@ class RegistryTests(unittest.TestCase):
         }, started_new_chat=True)
 
         self.assertIn("SceneIssues/open/capture", active)
-        self.assertIn("SceneIssues/closed/capture", completion)
-        self.assertIn("origin/master", completion)
+        self.assertIn("SceneIssues/pending/capture", completion)
+        self.assertIn("origin/main", completion)
         self.assertIn("abc123", queued)
         self.assertIn("monitor it without replacing", queued)
+
+    def test_new_chat_includes_bounded_handoff_but_normal_nudge_does_not(self):
+        temporary = tempfile.mkdtemp(prefix="automation-handoff-test-")
+        previous_dir = auto.HANDOFF_DIR
+        auto.HANDOFF_DIR = temporary
+
+        def restore():
+            auto.HANDOFF_DIR = previous_dir
+            shutil.rmtree(temporary, ignore_errors=True)
+
+        self.addCleanup(restore)
+        path = auto.handoff_path("capture")
+        with open(path, "w") as handle:
+            handle.write("START-OBJECTIVE\n" + ("x" * 9000) + "\nEND-NEXT-STEP")
+
+        info = {"last_prompted": 99, "work_kind": auto.ISSUE_WORK_KIND}
+        fresh = auto.message_for_nudge(2, "capture", info, started_new_chat=True)
+        normal = auto.message_for_nudge(2, "capture", info, started_new_chat=False)
+        bounded = auto.read_handoff("capture")
+
+        self.assertLessEqual(len(bounded), auto.MAX_HANDOFF_CHARS)
+        self.assertIn("START-OBJECTIVE", bounded)
+        self.assertIn("END-NEXT-STEP", bounded)
+        self.assertIn("[handoff truncated by coordinator]", bounded)
+        self.assertIn("You are agent-2", fresh)
+        self.assertIn("PREVIOUS CHAT HANDOFF", fresh)
+        self.assertIn("START-OBJECTIVE", fresh)
+        self.assertIn("END-NEXT-STEP", fresh)
+        self.assertEqual("continue", normal)
+        self.assertNotIn("START-OBJECTIVE", normal)
+        self.assertNotIn("END-NEXT-STEP", normal)
+
+    def test_missing_handoff_falls_back_to_fresh_assignment_prompt(self):
+        temporary = tempfile.mkdtemp(prefix="automation-handoff-missing-")
+        previous_dir = auto.HANDOFF_DIR
+        auto.HANDOFF_DIR = temporary
+
+        def restore():
+            auto.HANDOFF_DIR = previous_dir
+            shutil.rmtree(temporary, ignore_errors=True)
+
+        self.addCleanup(restore)
+        message = auto.message_for_nudge(4, "capture", {
+            "last_prompted": 99,
+            "work_kind": auto.ISSUE_WORK_KIND,
+        }, started_new_chat=True)
+
+        self.assertIn("SceneIssues/open/capture", message)
+        self.assertNotIn("PREVIOUS CHAT HANDOFF", message)
+
+    def test_terminal_assignment_removes_local_handoff(self):
+        temporary = tempfile.mkdtemp(prefix="automation-handoff-terminal-")
+        previous_dir = auto.HANDOFF_DIR
+        auto.HANDOFF_DIR = temporary
+
+        def restore():
+            auto.HANDOFF_DIR = previous_dir
+            shutil.rmtree(temporary, ignore_errors=True)
+
+        self.addCleanup(restore)
+        path = auto.handoff_path("capture")
+        with open(path, "w") as handle:
+            handle.write("current state")
+        registry = {"tasks": {"capture": {
+            "status": "in_progress",
+            "owner": "agent-2",
+        }}}
+
+        auto.mark_terminal("capture", registry, {
+            "status": "fixed",
+            "branch_head": "abc",
+            "fix_commit": "def",
+        }, now=123)
+
+        self.assertFalse(os.path.exists(path))
+        self.assertEqual("fixed", registry["tasks"]["capture"]["status"])
 
     def test_send_message_requires_running_response_confirmation(self):
         events = []
@@ -203,7 +299,7 @@ class RegistryTests(unittest.TestCase):
         auto.handle_tab(3, registry, [])
 
         self.assertEqual(1, len(messages))
-        self.assertIn("SceneIssues/open/capture", messages[0])
+        self.assertEqual("continue", messages[0])
         self.assertTrue(registry["tasks"]["capture"]["response_active"])
 
     def test_got_it_replaces_stale_draft_with_current_assignment(self):
@@ -247,7 +343,7 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(("capture", "got-it-dismissed-agent-2"), events[4])
         self.assertEqual("send", events[5][0])
         self.assertIn("SceneIssues/open/capture", events[5][1])
-        self.assertIn("fixes/agent-2", events[5][1])
+        self.assertIn("Work only inside the assigned `.worktrees/<SceneIssue-directory-name>` checkout", events[5][1])
         info = registry["tasks"]["capture"]
         self.assertEqual(2, info["prompt_count"])
         self.assertTrue(info["response_active"])
@@ -286,7 +382,7 @@ class RegistryTests(unittest.TestCase):
 
         self.assertEqual(1, len(events))
         self.assertIn("SceneIssues/open/new-capture", events[0])
-        self.assertIn("fixes/agent-7", events[0])
+        self.assertIn("Work only inside the assigned `.worktrees/<SceneIssue-directory-name>` checkout", events[0])
         self.assertEqual("agent-7", registry["tasks"]["new-capture"]["owner"])
         self.assertEqual("in_progress", registry["tasks"]["new-capture"]["status"])
 
@@ -400,6 +496,7 @@ class RegistryTests(unittest.TestCase):
             END = "end"
 
         replacements = {
+            "activate_browser": lambda: events.append(("activate_browser",)),
             "keyDown": lambda value: events.append(("down", value)),
             "keyUp": lambda value: events.append(("up", value)),
             "type": lambda *values: events.append(("type",) + values),
@@ -423,13 +520,15 @@ class RegistryTests(unittest.TestCase):
         auto.switch_to_tab(4)
 
         self.assertEqual([
+            ("activate_browser",),
+            ("wait", 0.5),
             ("up", "cmd"),
             ("up", "ctrl"),
             ("type", "4", "cmd"),
             ("up", "cmd"),
             ("wait", auto.TAB_SETTLE_SECONDS),
             ("type", "end"),
-            ("wait", 1),
+            ("wait", 0.1),
         ], events)
 
     def test_tab_refresh_clock_initializes_and_expires_after_twenty_minutes(self):
@@ -444,6 +543,25 @@ class RegistryTests(unittest.TestCase):
         auto.mark_tab_activity(4, registry, now=2000)
         self.assertFalse(auto.tab_needs_refresh(4, registry, now=2001))
         self.assertEqual(2000, registry["tabs"]["4"]["last_activity"])
+
+    def test_page_refresh_requires_full_assignment_on_next_send(self):
+        registry = {"version": 1, "tasks": {"capture": {
+            "status": "in_progress",
+            "owner": "agent-2",
+            "last_prompted": 123,
+            "prompt_count": 4,
+            "prompt_confirmed": True,
+            "work_kind": auto.ISSUE_WORK_KIND,
+        }}}
+
+        auto.mark_tab_refresh(2, registry, now=200)
+        info = registry["tasks"]["capture"]
+
+        self.assertEqual(0, info["last_prompted"])
+        self.assertFalse(info["prompt_confirmed"])
+        message = auto.message_for_nudge(2, "capture", info, started_new_chat=False)
+        self.assertIn("You are agent-2", message)
+        self.assertIn("SceneIssues/open/capture", message)
 
     def test_idle_tab_is_refreshed_after_twenty_minutes(self):
         registry = {
@@ -489,30 +607,29 @@ class RegistryTests(unittest.TestCase):
         self.assertFalse(registry["tasks"]["capture"]["prompt_confirmed"])
         self.assertTrue(auto.should_nudge(registry["tasks"]["capture"], now=101))
 
-    def test_assignment_prompt_names_only_the_agents_persistent_branches(self):
+    def test_assignment_prompt_requires_review_handoff(self):
         prompt = auto.task_prompt(3, "20260825-capture", auto.ISSUE_WORK_KIND)
 
-        self.assertIn("`fixes/agent-3`", prompt)
-        self.assertIn("`ci-test/fixes/agent-3`", prompt)
         self.assertIn("SceneIssues/open/20260825-capture", prompt)
         self.assertIn("SceneIssues/pending/20260825-capture", prompt)
-        self.assertIn("SceneIssues/closed/20260825-capture", prompt)
         self.assertIn("competing hypotheses", prompt)
         self.assertIn("behavioral regression", prompt)
-        self.assertIn("SceneIssues/issue-readme.md", prompt)
-        self.assertIn("exact-SHA CI", prompt)
-        self.assertIn("push that exact branch head to `origin/master`", prompt)
-        self.assertLessEqual(len(prompt.split()), 170)
+        self.assertIn("SceneIssues/README.md", prompt)
+        self.assertIn("Work only inside the assigned `.worktrees/<SceneIssue-directory-name>` checkout", prompt)
+        self.assertIn("push the verified detached worktree HEAD to `origin/main`", prompt)
+        self.assertIn("Never merge, push, cherry-pick, or otherwise promote incomplete feature work", prompt)
+        self.assertNotIn("fixes/agent-3", prompt)
+        self.assertNotIn("ci-test/fixes/agent-3", prompt)
 
     def test_feature_assignment_uses_feature_plan_and_task_directions(self):
         prompt = auto.task_prompt(5, "20260828-feature", auto.FEATURE_WORK_KIND)
 
         self.assertIn("feature assignment", prompt)
-        self.assertIn("SceneIssues/feature-readme.md", prompt)
+        self.assertIn("SceneIssues/README.md", prompt)
         self.assertIn("separate `plan.md` and `tasks.md`", prompt)
-        self.assertIn("Add discovered required work", prompt)
-        self.assertIn("every checkbox and acceptance criterion", prompt)
-        self.assertNotIn("SceneIssues/issue-readme.md", prompt)
+        self.assertIn("add discovered required work", prompt)
+        self.assertIn("next unchecked non-blocked task", prompt)
+        self.assertIn("SceneIssues/README.md", prompt)
 
     def test_scene_work_kind_prefers_metadata_then_feature_note_prefix(self):
         previous_read = auto.read_json_at_ref
@@ -533,15 +650,15 @@ class RegistryTests(unittest.TestCase):
             "work_kind": auto.FEATURE_WORK_KIND,
         })
 
-        self.assertIn("SceneIssues/feature-readme.md", prompt)
-        self.assertIn("do not close with any unchecked task", prompt)
+        self.assertIn("SceneIssues/README.md", prompt)
+        self.assertIn("do not close with any required task unchecked", prompt)
 
         close_prompt = auto.continuation_prompt(5, "20260828-feature", {
             "work_kind": auto.FEATURE_WORK_KIND,
-            "completion_gate": {"state": "close_and_merge"},
+            "completion_gate": {"state": "merge_to_master"},
         })
-        self.assertIn("confirm every `tasks.md` checkbox", close_prompt)
-        self.assertIn("keep the feature open or pending", close_prompt)
+        self.assertIn("do not close with any required task unchecked", close_prompt)
+        self.assertIn("SceneIssues/pending/20260828-feature", close_prompt)
 
     def test_claims_are_oldest_first_and_exclusive(self):
         registry = {"version": 1, "tasks": {}}
@@ -558,6 +675,69 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual("20260825-b", second)
         self.assertEqual("agent-1", registry["tasks"][first]["owner"])
         self.assertEqual("agent-2", registry["tasks"][second]["owner"])
+
+    def test_claim_skips_open_task_with_unclosed_dependencies(self):
+        registry = {"version": 1, "tasks": {}}
+        previous_read = auto.read_json_at_ref
+        previous_exists = auto.path_exists_at_ref
+        manifests = {
+            "blocked": {"dependsOn": ["dependency-a", "dependency-b"]},
+            "ready": {},
+        }
+        auto.read_json_at_ref = lambda unused_ref, path: manifests.get(path.split("/")[2])
+        auto.path_exists_at_ref = lambda unused_ref, path: path.endswith(
+            "SceneIssues/closed/dependency-a/issue.json")
+        self.addCleanup(setattr, auto, "read_json_at_ref", previous_read)
+        self.addCleanup(setattr, auto, "path_exists_at_ref", previous_exists)
+
+        claimed = auto.claim_new_task(
+            "agent-1", None, None, registry, ["blocked", "ready"], now=100)
+
+        self.assertEqual("ready", claimed)
+        self.assertNotIn("blocked", registry["tasks"])
+        self.assertEqual("agent-1", registry["tasks"]["ready"]["owner"])
+
+    def test_claim_allows_task_when_every_dependency_is_closed(self):
+        registry = {"version": 1, "tasks": {}}
+        previous_read = auto.read_json_at_ref
+        previous_exists = auto.path_exists_at_ref
+        auto.read_json_at_ref = lambda unused_ref, unused_path: {
+            "dependsOn": ["dependency-a", "dependency-b"],
+        }
+        auto.path_exists_at_ref = lambda unused_ref, path: path in (
+            "SceneIssues/closed/dependency-a/issue.json",
+            "SceneIssues/closed/dependency-b/issue.json",
+        )
+        self.addCleanup(setattr, auto, "read_json_at_ref", previous_read)
+        self.addCleanup(setattr, auto, "path_exists_at_ref", previous_exists)
+
+        claimed = auto.claim_new_task(
+            "agent-1", None, None, registry, ["ready"], now=100)
+
+        self.assertEqual("ready", claimed)
+
+    def test_reconcile_releases_premature_dependency_blocked_assignment(self):
+        registry = {"version": 1, "tasks": {"blocked": {
+            "status": "in_progress",
+            "owner": "agent-5",
+            "claimed_at": 10,
+            "last_heartbeat": 20,
+            "lease_history": [],
+        }}}
+        previous_read = auto.read_json_at_ref
+        previous_exists = auto.path_exists_at_ref
+        auto.read_json_at_ref = lambda unused_ref, path: (
+            {"dependsOn": ["dependency-a"]} if path.endswith("/blocked/issue.json") else None)
+        auto.path_exists_at_ref = lambda unused_ref, unused_path: False
+        self.addCleanup(setattr, auto, "read_json_at_ref", previous_read)
+        self.addCleanup(setattr, auto, "path_exists_at_ref", previous_exists)
+
+        changed = auto.reconcile_assignments(registry, now=100)
+
+        self.assertTrue(changed)
+        self.assertIsNone(auto.get_agent_task("agent-5", registry))
+        self.assertEqual("blocked_dependency", registry["tasks"]["blocked"]["status"])
+        self.assertEqual(["dependency-a"], registry["tasks"]["blocked"]["blocked_dependencies"])
 
     def test_open_queue_reclaims_task_with_terminal_registry_record(self):
         registry = {"version": 1, "tasks": {"capture": {
@@ -597,25 +777,26 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual("agent-1", info["lease_history"][0]["owner"])
         self.assertEqual("stale", info["lease_history"][0]["ended_as"])
 
-    def test_stale_claim_with_unmerged_work_requires_handoff(self):
+    def test_stale_claim_ignores_legacy_unmerged_branch_state(self):
         registry = {"version": 1, "tasks": {}}
         auto.claim_new_task(
             "agent-1", "fixes/agent-1", "ci-test/fixes/agent-1",
             registry, ["capture"], now=10)
         previous_check = auto.branch_has_unmerged_work
-        auto.branch_has_unmerged_work = lambda branch: branch == "fixes/agent-1"
+        auto.branch_has_unmerged_work = lambda branch: True
         self.addCleanup(setattr, auto, "branch_has_unmerged_work", previous_check)
 
         claimed = auto.claim_new_task(
-            "agent-2", "fixes/agent-2", "ci-test/fixes/agent-2",
+            "agent-2", None, None,
             registry, ["capture"], now=10 + auto.STALE_SECONDS + 1)
 
-        self.assertIsNone(claimed)
+        self.assertEqual("capture", claimed)
         info = registry["tasks"]["capture"]
-        self.assertEqual("agent-1", info["owner"])
-        self.assertTrue(info["handoff_required"])
+        self.assertEqual("agent-2", info["owner"])
+        self.assertIsNone(info["branch"])
+        self.assertIsNone(info["ci_branch"])
 
-    def test_continuation_prompt_explains_failed_ci_gate(self):
+    def test_continuation_prompt_keeps_shared_master_policy_during_gate_failures(self):
         info = {"completion_gate": {
             "state": "failure",
             "ci_branch": "ci-test/fixes/agent-4",
@@ -625,23 +806,21 @@ class RegistryTests(unittest.TestCase):
 
         prompt = auto.continuation_prompt(4, "20260825-capture", info)
 
-        self.assertIn("ci/single-test=failure", prompt)
-        self.assertIn("ci-test/fixes/agent-4", prompt)
-        self.assertIn("abc123", prompt)
-        self.assertIn("infrastructure failure", prompt)
-        self.assertIn("update the assigned CI ref once", prompt)
+        self.assertIn("SceneIssues/open/20260825-capture", prompt)
+        self.assertIn("Work only inside the assigned `.worktrees/<SceneIssue-directory-name>` checkout", prompt)
+        self.assertIn("push the verified detached worktree HEAD to `origin/main`", prompt)
+        self.assertIn("Do not publish partial work to `origin/main`", prompt)
 
-    def test_completion_prompt_closes_and_merges_the_assigned_issue(self):
+    def test_completion_prompt_uses_open_to_review_workflow(self):
         prompt = auto.continuation_prompt(2, "20260825-capture", {
             "completion_gate": {
-                "state": "close_and_merge",
+                "state": "merge_to_master",
             },
         })
 
+        self.assertIn("SceneIssues/open/20260825-capture", prompt)
         self.assertIn("SceneIssues/pending/20260825-capture", prompt)
-        self.assertIn("SceneIssues/closed/20260825-capture", prompt)
-        self.assertIn("push its exact head to `origin/master`", prompt)
-        self.assertIn("do not wait for the coordinator", prompt)
+        self.assertIn("commit in the assigned SceneIssue worktree", prompt)
 
     def test_queued_ci_is_not_nudged(self):
         info = {
@@ -683,12 +862,10 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual("queued", registry["tasks"]["capture"]["ci_activity"]["state"])
         self.assertEqual(42, registry["tasks"]["capture"]["ci_activity"]["run_id"])
 
-    def test_nudge_interval_backs_off_and_caps(self):
-        self.assertEqual(auto.NUDGE_INTERVAL_SECONDS, auto.nudge_interval({}))
-        self.assertEqual(auto.NUDGE_INTERVAL_SECONDS * 2,
-                         auto.nudge_interval({"prompt_count": 2}))
-        self.assertEqual(auto.MAX_NUDGE_INTERVAL_SECONDS,
-                         auto.nudge_interval({"prompt_count": 20}))
+    def test_nudge_interval_stays_at_normal_continue_cadence(self):
+        self.assertEqual(30, auto.nudge_interval({}))
+        self.assertEqual(30, auto.nudge_interval({"prompt_count": 2}))
+        self.assertEqual(30, auto.nudge_interval({"prompt_count": 20}))
 
     def test_input_box_immediately_continues_a_finished_response(self):
         info = {"status": "in_progress", "response_active": True}
@@ -717,7 +894,7 @@ class RegistryTests(unittest.TestCase):
 
     def test_completion_gates_remain_actionable(self):
         self.assertTrue(auto.should_nudge({
-            "completion_gate": {"state": "close_and_merge"},
+            "completion_gate": {"state": "merge_to_master"},
         }, now=100000))
         self.assertTrue(auto.should_nudge({
             "completion_gate": {"state": "merge_to_master"},
@@ -796,7 +973,7 @@ class GitCompletionTests(unittest.TestCase):
         self.git("add", ".")
         self.git("commit", "-qm", "queue capture")
         self.base = self.git("rev-parse", "HEAD").strip()
-        self.git("update-ref", "refs/remotes/origin/master", self.base)
+        self.git("update-ref", "refs/remotes/origin/main", self.base)
 
     def git(self, *arguments):
         output = subprocess.check_output(["git", "-C", self.repo] + list(arguments))
@@ -806,56 +983,36 @@ class GitCompletionTests(unittest.TestCase):
         with open(os.path.join(self.issue_dir, "issue.json"), "w") as handle:
             json.dump(value, handle)
 
-    def publish_pending_branch(self, fix_commit=None):
+    def publish_closed_branch(self, fix_commit=None):
         marker = os.path.join(self.repo, "production-fix.txt")
         with open(marker, "w") as handle:
             handle.write("fixed\n")
         self.git("add", marker)
         self.git("commit", "-qm", "production fix")
         actual_fix = self.git("rev-parse", "HEAD").strip()
-        pending_dir = os.path.join(
-            self.repo, "SceneIssues", "pending", "20260825-capture")
-        os.makedirs(os.path.dirname(pending_dir), exist_ok=True)
-        os.rename(self.issue_dir, pending_dir)
-        self.issue_dir = pending_dir
-        self.write_issue({
-            "status": "pending",
-            "resolutionSummary": "The fixture is fixed.",
-            "regressionTest": "Example.Tests.CapturedViewIsFixed",
-            "fixCommit": fix_commit or actual_fix,
-        })
-        self.git("add", "SceneIssues")
-        self.git("commit", "-qm", "resolve capture")
-        head = self.git("rev-parse", "HEAD").strip()
-        self.git("update-ref", "refs/remotes/origin/fixes/agent-1", head)
-        return actual_fix, head
-
-    def close_issue_on_feature_branch(self, fix_commit):
-        pending_dir = os.path.join(
-            self.repo, "SceneIssues", "pending", "20260825-capture")
         closed_dir = os.path.join(
             self.repo, "SceneIssues", "closed", "20260825-capture")
         os.makedirs(os.path.dirname(closed_dir), exist_ok=True)
-        os.rename(pending_dir, closed_dir)
+        os.rename(self.issue_dir, closed_dir)
         self.issue_dir = closed_dir
         self.write_issue({
             "status": "fixed",
             "resolvedUtc": "2026-08-25T13:00:00Z",
             "resolutionSummary": "The fixture is fixed.",
             "regressionTest": "Example.Tests.CapturedViewIsFixed",
-            "fixCommit": fix_commit,
+            "fixCommit": fix_commit or actual_fix,
         })
         self.git("add", "SceneIssues")
         self.git("commit", "-qm", "complete capture")
         head = self.git("rev-parse", "HEAD").strip()
         self.git("update-ref", "refs/remotes/origin/fixes/agent-1", head)
-        return head
+        return actual_fix, head
 
     def publish_ci_branch(self, head):
         self.git("update-ref", "refs/remotes/origin/ci-test/fixes/agent-1", head)
 
     def promote_to_master(self, head):
-        self.git("update-ref", "refs/remotes/origin/master", head)
+        self.git("update-ref", "refs/remotes/origin/main", head)
 
     def mock_ci(self, status, run=None):
         previous_status = auto.github_status_context
@@ -868,12 +1025,12 @@ class GitCompletionTests(unittest.TestCase):
     def test_lists_only_open_issues_from_remote_master(self):
         self.assertEqual(["20260825-capture"], auto.list_open_tasks())
 
-    def test_accepts_pending_issue_with_ancestor_fix_commit(self):
-        fix_commit, head = self.publish_pending_branch()
+    def test_accepts_closed_issue_with_ancestor_fix_commit(self):
+        fix_commit, head = self.publish_closed_branch()
 
-        terminal = auto.pending_issue_state("20260825-capture", "fixes/agent-1")
+        terminal = auto.completion_issue_state("20260825-capture", "fixes/agent-1")
 
-        self.assertEqual("pending", terminal["status"])
+        self.assertEqual("fixed", terminal["status"])
         self.assertEqual(fix_commit, terminal["fix_commit"])
         self.assertEqual(head, terminal["branch_head"])
 
@@ -884,10 +1041,10 @@ class GitCompletionTests(unittest.TestCase):
             json.dump({"status": "open"}, handle)
         self.git("add", extra_dir)
         self.git("commit", "-qm", "incorrectly add capture on worker branch")
-        self.publish_pending_branch()
+        self.publish_closed_branch()
 
         introduced = auto.branch_introduced_issue_paths("fixes/agent-1")
-        terminal = auto.pending_issue_state("20260825-capture", "fixes/agent-1")
+        terminal = auto.completion_issue_state("20260825-capture", "fixes/agent-1")
 
         self.assertEqual(["SceneIssues/open/worker-created/issue.json"], introduced)
         self.assertIsNone(terminal)
@@ -900,7 +1057,7 @@ class GitCompletionTests(unittest.TestCase):
         self.git("add", other_dir)
         self.git("commit", "-qm", "queue another capture")
         self.base = self.git("rev-parse", "HEAD").strip()
-        self.git("update-ref", "refs/remotes/origin/master", self.base)
+        self.git("update-ref", "refs/remotes/origin/main", self.base)
 
         with open(os.path.join(other_dir, "plan.md"), "w") as handle:
             handle.write("unrelated edit\n")
@@ -909,24 +1066,24 @@ class GitCompletionTests(unittest.TestCase):
             json.dump({"test": "wrong branch"}, handle)
         self.git("add", ".")
         self.git("commit", "-qm", "contaminate feature branch")
-        self.publish_pending_branch()
+        self.publish_closed_branch()
 
         violations = auto.branch_policy_violations(
             "20260825-capture", "fixes/agent-1")
-        terminal = auto.pending_issue_state("20260825-capture", "fixes/agent-1")
+        terminal = auto.completion_issue_state("20260825-capture", "fixes/agent-1")
 
         self.assertIn(".github/test-request.json", violations)
         self.assertIn("SceneIssues/open/other-capture/plan.md", violations)
         self.assertIsNone(terminal)
 
     def test_rejects_fixed_issue_with_unrelated_fix_commit(self):
-        self.publish_pending_branch(fix_commit="0" * 40)
+        self.publish_closed_branch(fix_commit="0" * 40)
 
-        terminal = auto.pending_issue_state("20260825-capture", "fixes/agent-1")
+        terminal = auto.completion_issue_state("20260825-capture", "fixes/agent-1")
 
         self.assertIsNone(terminal)
 
-    def test_rejects_pending_issue_that_was_not_moved_from_open(self):
+    def test_rejects_fixed_issue_that_was_not_moved_from_open(self):
         marker = os.path.join(self.repo, "production-fix.txt")
         with open(marker, "w") as handle:
             handle.write("fixed\n")
@@ -934,7 +1091,8 @@ class GitCompletionTests(unittest.TestCase):
         self.git("commit", "-qm", "production fix")
         fix_commit = self.git("rev-parse", "HEAD").strip()
         self.write_issue({
-            "status": "pending",
+            "status": "fixed",
+            "resolvedUtc": "2026-08-25T13:00:00Z",
             "resolutionSummary": "The fixture is fixed.",
             "regressionTest": "Example.Tests.CapturedViewIsFixed",
             "fixCommit": fix_commit,
@@ -944,31 +1102,26 @@ class GitCompletionTests(unittest.TestCase):
         head = self.git("rev-parse", "HEAD").strip()
         self.git("update-ref", "refs/remotes/origin/fixes/agent-1", head)
 
-        terminal = auto.pending_issue_state("20260825-capture", "fixes/agent-1")
+        terminal = auto.completion_issue_state("20260825-capture", "fixes/agent-1")
 
         self.assertIsNone(terminal)
 
-    def test_blocked_issue_is_not_pending(self):
-        pending_dir = os.path.join(
-            self.repo, "SceneIssues", "pending", "20260825-capture")
-        os.makedirs(os.path.dirname(pending_dir), exist_ok=True)
-        os.rename(self.issue_dir, pending_dir)
-        self.issue_dir = pending_dir
+    def test_blocked_issue_is_not_complete(self):
         self.write_issue({
             "status": "blocked",
             "resolutionSummary": "Waiting for external evidence.",
         })
         self.git("add", "SceneIssues")
-        self.git("commit", "-qm", "incorrectly close blocked capture")
+        self.git("commit", "-qm", "mark capture blocked")
         head = self.git("rev-parse", "HEAD").strip()
         self.git("update-ref", "refs/remotes/origin/fixes/agent-1", head)
 
-        terminal = auto.pending_issue_state("20260825-capture", "fixes/agent-1")
+        terminal = auto.completion_issue_state("20260825-capture", "fixes/agent-1")
 
         self.assertIsNone(terminal)
 
-    def test_reconcile_prompts_verified_pending_issue_to_close_and_merge(self):
-        fix_commit, head = self.publish_pending_branch()
+    def test_reconcile_prompts_verified_closed_issue_to_merge_master(self):
+        fix_commit, head = self.publish_closed_branch()
         self.publish_ci_branch(head)
         registry = {"version": 1, "tasks": {
             "20260825-capture": {
@@ -986,15 +1139,14 @@ class GitCompletionTests(unittest.TestCase):
         self.assertTrue(changed)
         info = registry["tasks"]["20260825-capture"]
         self.assertEqual("in_progress", info["status"])
-        self.assertEqual("close_and_merge", info["completion_gate"]["state"])
+        self.assertEqual("merge_to_master", info["completion_gate"]["state"])
         self.assertEqual(fix_commit, info["completion_gate"]["fix_commit"])
         self.assertEqual(head, info["completion_gate"]["completion_commit"])
         self.assertEqual("20260825-capture", auto.get_agent_task("agent-1", registry))
 
     def test_reconcile_prompts_closed_feature_branch_to_merge_master(self):
-        fix_commit, head = self.publish_pending_branch()
-        self.publish_ci_branch(head)
-        closed_head = self.close_issue_on_feature_branch(fix_commit)
+        fix_commit, closed_head = self.publish_closed_branch()
+        self.publish_ci_branch(closed_head)
         registry = {"version": 1, "tasks": {
             "20260825-capture": {
                 "status": "in_progress",
@@ -1014,9 +1166,8 @@ class GitCompletionTests(unittest.TestCase):
         self.assertEqual(closed_head, info["completion_gate"]["completion_commit"])
 
     def test_reconcile_marks_fixed_after_worker_merges_closed_branch(self):
-        fix_commit, head = self.publish_pending_branch()
-        self.publish_ci_branch(head)
-        closed_head = self.close_issue_on_feature_branch(fix_commit)
+        fix_commit, closed_head = self.publish_closed_branch()
+        self.publish_ci_branch(closed_head)
         self.promote_to_master(closed_head)
         registry = {"version": 1, "tasks": {
             "20260825-capture": {
@@ -1035,8 +1186,7 @@ class GitCompletionTests(unittest.TestCase):
         self.assertEqual(300, registry["tasks"]["20260825-capture"]["completed_at"])
 
     def test_master_closed_issue_releases_worker_without_feature_branch(self):
-        fix_commit, unused_head = self.publish_pending_branch()
-        closed_head = self.close_issue_on_feature_branch(fix_commit)
+        fix_commit, closed_head = self.publish_closed_branch()
         self.promote_to_master(closed_head)
         self.git("update-ref", "-d", "refs/remotes/origin/fixes/agent-1")
         registry = {"version": 1, "tasks": {
@@ -1045,7 +1195,7 @@ class GitCompletionTests(unittest.TestCase):
                 "owner": "agent-1",
                 "branch": "fixes/agent-1",
                 "ci_branch": "ci-test/fixes/agent-1",
-                "completion_gate": {"state": "close_and_merge"},
+                "completion_gate": {"state": "merge_to_master"},
             }
         }}
 
@@ -1058,8 +1208,7 @@ class GitCompletionTests(unittest.TestCase):
         self.assertIsNone(auto.get_agent_task("agent-1", registry))
 
     def test_closed_queue_with_invalid_fix_ancestry_releases_and_assigns_next_ticket(self):
-        unused_fix_commit, unused_head = self.publish_pending_branch()
-        closed_head = self.close_issue_on_feature_branch("0" * 40)
+        unused_fix_commit, closed_head = self.publish_closed_branch(fix_commit="0" * 40)
         self.promote_to_master(closed_head)
 
         next_id = "20260826-next-capture"
@@ -1085,7 +1234,7 @@ class GitCompletionTests(unittest.TestCase):
         self.assertTrue(changed)
         closed_info = registry["tasks"]["20260825-capture"]
         self.assertEqual("fixed", closed_info["status"])
-        self.assertIn("fixCommit is not on origin/master",
+        self.assertIn("fixCommit is not on origin/main",
                       closed_info["completion_audit_warnings"])
         self.assertIsNone(auto.get_agent_task("agent-7", registry))
 
@@ -1120,9 +1269,8 @@ class GitCompletionTests(unittest.TestCase):
         self.assertNotIn("SceneIssues/open/20260825-capture", messages[0])
 
     def test_reconcile_waits_for_green_targeted_ci(self):
-        unused_fix_commit, head = self.publish_pending_branch()
+        unused_fix_commit, head = self.publish_closed_branch()
         self.publish_ci_branch(head)
-        self.promote_to_master(head)
         registry = {"version": 1, "tasks": {
             "20260825-capture": {
                 "status": "in_progress",
@@ -1148,7 +1296,7 @@ class GitCompletionTests(unittest.TestCase):
         self.assertEqual(123, gate["run_id"])
 
     def test_reconcile_green_fix_requests_close_and_merge(self):
-        unused_fix_commit, head = self.publish_pending_branch()
+        unused_fix_commit, head = self.publish_closed_branch()
         self.publish_ci_branch(head)
         registry = {"version": 1, "tasks": {
             "20260825-capture": {
@@ -1165,7 +1313,7 @@ class GitCompletionTests(unittest.TestCase):
         self.assertTrue(changed)
         info = registry["tasks"]["20260825-capture"]
         self.assertEqual("in_progress", info["status"])
-        self.assertEqual("close_and_merge", info["completion_gate"]["state"])
+        self.assertEqual("merge_to_master", info["completion_gate"]["state"])
 
     def test_reconcile_clears_stale_ci_gate_when_issue_is_not_terminal(self):
         registry = {"version": 1, "tasks": {
